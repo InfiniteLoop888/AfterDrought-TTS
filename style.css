@@ -28,6 +28,8 @@
 #tad-bubble-menu button:hover {
     background: color-mix(in srgb, currentColor 10%, transparent);
 }
+
+.voice-bubble {
     display: inline-flex;
     align-items: center;
     justify-content: space-between;
