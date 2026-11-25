@@ -64,7 +64,8 @@
     gap: 4px;
 }
 
-.tad-panel input[type="text"] {
+.tad-panel input[type="text"],
+.tad-panel input[type="file"] {
     width: 100%;
     box-sizing: border-box;
 }
