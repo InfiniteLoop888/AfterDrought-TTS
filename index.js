@@ -944,16 +944,24 @@ const audioStore = {
 
 let folderHandle = null;
 
-// 浏览器断开只是停止等待，网关那边的任务要单独撤回。
-function cancelRemote(requestIds) {
-    const ids = requestIds.filter(Boolean);
-    if (!ids.length) return;
-    fetch(`${apiBase()}/v1/tts/cancel`, {
-        method: 'POST',
-        headers: apiHeaders({ 'content-type': 'application/json' }),
-        body: JSON.stringify({ request_ids: ids, session_id: sessionId() }),
-        keepalive: true,
-    }).catch(() => { /* 旧版网关没有取消接口时忽略 */ });
+// 浏览器断开只是停止等待，网关那边的任务要单独撤回。按提交时的会话分组，切了聊天也不会拿错 session。
+function cancelRemote(requests) {
+    const groups = new Map();
+    for (const item of requests) {
+        const requestId = item && item.requestId;
+        if (!requestId) continue;
+        const key = item.sessionId || '';
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(requestId);
+    }
+    for (const [session, ids] of groups) {
+        fetch(`${apiBase()}/v1/tts/cancel`, {
+            method: 'POST',
+            headers: apiHeaders({ 'content-type': 'application/json' }),
+            body: JSON.stringify({ request_ids: ids, session_id: session }),
+            keepalive: true,
+        }).catch(() => { /* 旧版网关没有取消接口时忽略 */ });
+    }
 }
 
 function stopPlayback() {
@@ -989,11 +997,19 @@ function sessionId() {
     }
 }
 
+// 每次真正提交都换一个 ID。缓存键只用来找音频，不用来标识请求。
+function newRequestId() {
+    try {
+        if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+    } catch { /* 老浏览器没有 randomUUID */ }
+    return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 async function fetchAudio(segment) {
     const signal = speechAbort.signal;
     if (signal.aborted) throw new DOMException('已取消', 'AbortError');
     if (!segment.fresh && memory.has(segment.key)) return memory.get(segment.key);
-    const requestId = segment.fresh ? `${segment.key}:${Date.now()}` : `${sessionId()}:${segment.key}`;
+    const request = { requestId: newRequestId(), sessionId: sessionId() };
     const controller = new AbortController();
     const relay = () => controller.abort();
     let timedOut = false;
@@ -1002,12 +1018,12 @@ async function fetchAudio(segment) {
         timedOut = true;
         controller.abort();
     }, REQUEST_TIMEOUT_MS);
-    inflightRequests.set(segment.key, requestId);
+    inflightRequests.set(segment.key, request);
     try {
-        return await requestAudio(segment, requestId, controller.signal);
+        return await requestAudio(segment, request.requestId, controller.signal);
     } catch (error) {
         if (timedOut) {
-            cancelRemote([requestId]);
+            cancelRemote([request]);
             throw new Error(`语音网关 ${Math.round(REQUEST_TIMEOUT_MS / 1000)} 秒没有返回`);
         }
         if (error?.name === 'AbortError') throw new DOMException('已取消', 'AbortError');
@@ -1015,7 +1031,7 @@ async function fetchAudio(segment) {
     } finally {
         clearTimeout(timer);
         signal.removeEventListener('abort', relay);
-        if (inflightRequests.get(segment.key) === requestId) inflightRequests.delete(segment.key);
+        if (inflightRequests.get(segment.key)?.requestId === request.requestId) inflightRequests.delete(segment.key);
     }
 }
 
@@ -1070,7 +1086,16 @@ async function requestAudio(segment, requestId, signal) {
     }
     const blob = await response.blob();
     if (signal.aborted) throw new DOMException('已取消', 'AbortError');
+    if (!blob.size) throw new Error('语音网关返回了空音频');
+    if (/^text\/|html/i.test(type)) throw new Error('语音网关返回的不是音频');
+    const head = new Uint8Array(await blob.slice(0, 4).arrayBuffer());
+    const riff = head[0] === 0x52 && head[1] === 0x49 && head[2] === 0x46 && head[3] === 0x46;
+    const id3 = head[0] === 0x49 && head[1] === 0x44 && head[2] === 0x33;
+    const mpeg = head[0] === 0xff && (head[1] & 0xe0) === 0xe0;
+    if (!riff && !id3 && !mpeg) throw new Error('语音网关返回了无法识别的音频');
     const url = URL.createObjectURL(blob);
+    const previous = memory.get(segment.key);
+    if (previous && previous !== url) URL.revokeObjectURL(previous);
     memory.set(segment.key, url);
     audioStore.put({
         key: segment.key,
@@ -1430,8 +1455,7 @@ function scan() {
 function rerollBubble(btn) {
     if (!btn) return;
     const key = btn.dataset.key;
-    memory.delete(key);
-    audioStore.delete(key);
+    dropCachedAudio(key);
     bubblesByKey(key).forEach((node) => {
         node.dataset.status = 'waiting';
         node.removeAttribute('data-audio-url');
@@ -1805,7 +1829,7 @@ async function exportCache() {
     const manifest = [];
     for (const item of items) {
         if (!item?.blob || !item.key) continue;
-        const file = `${safeFilePart(item.speaker)}_${safeFilePart(item.text)}_${await shortHash(item.key)}.wav`;
+        const file = `[${safeFilePart(item.speaker)}]_${safeFilePart(item.text)}_${await shortHash(item.key)}.wav`;
         const handle = await folderHandle.getFileHandle(file, { create: true });
         const writable = await handle.createWritable();
         await writable.write(item.blob);
@@ -1860,7 +1884,8 @@ async function importCache() {
             imported += 1;
         }
     } catch { /* 没有清单时继续按文件名导入 */ }
-    const nameRe = /^\[(.*?)\]_(.+)_([a-f0-9]{6,})\.(wav|mp3|ogg)$/i;
+    // 带方括号的是现在导出的名字，不带的是旧版导出的名字，两种都认。
+    const nameRe = /^\[?(.*?)\]?_(.+)_([a-f0-9]{6,})\.(wav|mp3|ogg)$/i;
     for await (const [name, handle] of folderHandle.entries()) {
         if (handle.kind !== 'file' || seen.has(name) || !nameRe.test(name)) continue;
         const match = name.match(nameRe);
@@ -1904,13 +1929,8 @@ async function refreshStatus() {
     try {
         const response = await fetch(`${apiBase()}/health`, { headers: apiHeaders() });
         if (!response.ok) throw new Error(String(response.status));
-        const data = await response.json().catch(() => ({}));
-        if (data.studio && data.studio.online === false) {
-            text = '网关在线，7860 未就绪';
-        } else {
-            text = '语音网关在线';
-            ok = true;
-        }
+        text = '语音网关在线';
+        ok = true;
     } catch { /* 面板上显示未就绪 */ }
     nodes.forEach((node) => {
         node.textContent = text;
