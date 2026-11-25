@@ -16,6 +16,7 @@ const LEGACY_API = 'http://127.0.0.1:7860';
 const DEFAULT_API = 'http://127.0.0.1:9881';
 const FALLBACK_EMOTIONS = ['平静', '日常', '自然', '温柔', '轻松', '开心', '高兴', '喜悦', '兴奋', '狂喜', '不满', '不悦', '恼火', '生气', '愤怒', '暴怒', '恼羞成怒', '气愤', '委屈地生气', '压抑怒火', '冷淡不满', '失落', '难过', '悲伤', '伤心', '低落', '沮丧', '绝望', '心碎', '悲伤地微笑', '强忍悲伤', '哽咽', '哭泣', '痛哭', '紧张', '不安', '担忧', '害怕', '恐惧', '惊恐', '慌张', '焦虑', '忐忑', '如释重负', '嫌弃', '厌恶', '反感', '鄙夷', '嫌弃地吐槽', '无奈', '惊讶', '震惊', '惊喜', '意外', '疑惑', '困惑', '难以置信', '恍然大悟', '害羞', '羞涩', '脸红', '不好意思', '羞恼', '撒娇', '依恋', '宠溺', '暧昧', '温存', '深情', '吃醋', '占有欲', '委屈撒娇', '期待', '眷恋', '调皮', '俏皮', '得意', '自信', '傲娇', '温柔地责备', '无可奈何', '苦笑', '自嘲', '认真', '严肃', '坚定', '疲惫', '困倦', '慵懒', '敷衍', '冷淡', '尴尬', '释然', '感动', '欣慰', '幸福', '温暖', '耳语'];
 let emotionNames = FALLBACK_EMOTIONS.slice();
+let gatewayCharacters = [];
 
 const BARS_HTML = '<span class="sovits-voice-waves"><span class="sovits-voice-bar"></span><span class="sovits-voice-bar"></span><span class="sovits-voice-bar"></span></span>';
 const BUBBLE_ROOTS = '.mes_text, .message-body, .markdown-content, #chat .mes_text, .mes .text';
@@ -161,29 +162,58 @@ async function loadEmotionNames() {
     } catch { /* 网关不在时继续用短列表 */ }
 }
 
+function characterRosterText() {
+    if (!gatewayCharacters.length) {
+        return '语音网关的角色表还没有读到。开口的人按剧情写出全名，不要只写姓、称呼或代词。同一个人全篇只用这一个名字。';
+    }
+    const lines = gatewayCharacters.map((item) => {
+        const name = String(item.display_name || item.character_id || '').trim();
+        if (!name) return '';
+        const aliases = (Array.isArray(item.aliases) ? item.aliases : [])
+            .map((alias) => String(alias || '').trim())
+            .filter((alias) => alias && alias !== name);
+        return aliases.length ? `${name}（别名：${aliases.join('、')}）` : name;
+    }).filter(Boolean);
+    if (!lines.length) {
+        return '语音网关的角色表还没有读到。开口的人按剧情写出全名，不要只写姓、称呼或代词。同一个人全篇只用这一个名字。';
+    }
+    return `语音网关里已有这些角色。表里的人必须用列出的显示名，不要改成别名、昵称或代词：\n${lines.join('\n')}\n没有出现在这张表里的人，按剧情写出全名，不要只写姓、职位或「他」「她」。同一个人全篇只用这一个名字。`;
+}
+
+async function loadGatewayCharacters() {
+    try {
+        const response = await fetch(`${apiBase()}/v1/characters`, { headers: apiHeaders() });
+        if (!response.ok) return;
+        const data = await response.json();
+        if (!Array.isArray(data.characters)) return;
+        gatewayCharacters = data.characters.filter((item) => item && typeof item === 'object');
+        applyDialoguePrompt();
+        paintControls();
+    } catch { /* 网关不在时按剧情全名 */ }
+}
+
 function dialoguePrompt() {
-    const name = currentCharacterName();
-    const who = name ? `当前角色卡的名字是「${name}」。这个角色开口时必须使用这个名字，不要换成称呼、代词或昵称。\n` : '';
     return `[对白语音标记]
-${who}角色真正说出口的每一句都要打上语音标记，否则无法朗读。旁白、动作、心理活动保持普通正文，不要放进标记。
+角色真正说出口的每一句都要打上语音标记，否则无法朗读。旁白、动作、心理活动保持普通正文，不要放进标记。
 
 整句只有一种情绪时，标记和这句对白在同一行：
-[角色名, 情绪] 对白内容
+[角色名, 情绪] “对白内容”
 
-同一句里情绪变了，仍然只写一行。对白照常写在标记后面，行末用导演块按说话顺序拆开，每段各用一个情绪：
-[甘雨, 惊讶] 你怎么……我、我没有那个意思〖vd:{"segments":[{"text":"你怎么……","emotion":"惊讶","pause_after_ms":200},{"text":"我、我没有那个意思","emotion":"害羞"}]}〗
-segments 里的 text 按顺序拼起来要等于标记后的对白。最后一段省略 pause_after_ms。整句只有一种情绪时不要写 segments。
+分段少用。只有这一句里情绪明显换了，才仍然只写一行，并在右引号前用导演块按说话顺序拆开：
+[甘雨, 惊讶] “你怎么……我、我没有那个意思〖vd:{"segments":[{"text":"你怎么……","emotion":"惊讶","pause_after_ms":200},{"text":"我、我没有那个意思","emotion":"害羞"}]}〗”
+segments 里的 text 按顺序拼起来要等于引号里的对白，不要把引号写进 text。最后一段省略 pause_after_ms。整句只有一种情绪时不要写 segments。
 
 规则：
-1. 同一个人全篇只用同一个角色名。这个名字要和语音网关里的角色 id、显示名或别名一致。
+1. ${characterRosterText()}
 2. 情绪只能从这些词里选：${promptEmotionNames().join('、')}。听不出明显情绪时，标记里写 default，不要另造词。
-3. 标记后面同一行只写这一句口头对白。旁白另起一行，写在标记外面。
-4. 语气不是情绪。需要放轻、放慢或换一种口气时，写在同一行末尾：〖vd:{"delivery":{"intensity":"whisper","pace":"slow"}}〗。intensity 只能是 normal、gentle、soft、whisper、firm、cold、teasing、hesitant、excited、crying、laughing。pace 只能是 fast、normal、gentle、slow。分段和语气可以写在同一个导演块里。写错会被忽略，对白照常朗读。
+3. 标记后面同一行只写这一句口头对白，用 “” 包住。旁白另起一行，写在标记外面。
+4. 语气不是情绪。需要放轻、放慢或换一种口气时，写在右引号前面：〖vd:{"delivery":{"intensity":"whisper","pace":"slow"}}〗。intensity 只能是 normal、gentle、soft、whisper、firm、cold、teasing、hesitant、excited、crying、laughing。pace 只能是 fast、normal、gentle、slow。分段和语气可以写在同一个导演块里。写错会被忽略，对白照常朗读。
 
 示例：
 她把目光挪开。
-[甘雨, 害羞] 你、你怎么突然说这种话……
-[甘雨, default] 今天的工作终于结束了。`.trim();
+[甘雨, 害羞] “你、你怎么突然说这种话……”
+[甘雨, default] “今天的工作终于结束了。”
+[甘雨, 惊讶] “诶？你怎么突然回来了……我、我只是刚好在这里休息而已。〖vd:{"segments":[{"text":"诶？你怎么突然回来了……","emotion":"惊讶","pause_after_ms":200},{"text":"我、我只是刚好在这里休息而已。","emotion":"害羞"}]}〗”`.trim();
 }
 
 function promptRole(role) {
@@ -197,6 +227,7 @@ function activePrompt() {
     if (prompt.builtin === false && String(prompt.content || '').trim()) {
         return String(prompt.content)
             .replaceAll('{{CHAR}}', currentCharacterName())
+            .replaceAll('{{CHARACTERS}}', characterRosterText())
             .replaceAll('{{EMOTIONS}}', promptEmotionNames().join('、'));
     }
     return dialoguePrompt();
@@ -1222,7 +1253,7 @@ function paintControls() {
     });
     document.querySelectorAll('[data-tad="prompt-state"]').forEach((node) => {
         node.textContent = settings.prompt.builtin === false
-            ? '正在使用你改过的提示词。{{CHAR}} 会换成当前角色名，{{EMOTIONS}} 会换成情绪列表。'
+            ? '正在使用你改过的提示词。{{CHAR}} 会换成当前角色名，{{CHARACTERS}} 会换成网关角色表，{{EMOTIONS}} 会换成情绪列表。'
             : '正在使用内置对白格式。改动文本后，下一次生成改用你写的版本。';
     });
     document.querySelectorAll('[data-tad="cache-path"]').forEach((node) => {
@@ -1909,6 +1940,7 @@ function init() {
     }
     applyDialoguePrompt();
     loadEmotionNames();
+    loadGatewayCharacters();
     restoreFolder();
     refreshCacheCount();
     buildShell();
@@ -1943,6 +1975,7 @@ function init() {
             streaming = type !== 'quiet';
             speakableGeneration = type !== 'quiet';
             applyDialoguePrompt();
+            loadGatewayCharacters();
         });
     }
     if (event_types.CHAT_CHANGED) {
