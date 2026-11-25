@@ -2,6 +2,7 @@ import { eventSource, event_types, setExtensionPrompt, extension_prompt_types, e
 
 const STORAGE = {
     api: 'tad_api',
+    token: 'tad_token',
     auto: 'tad_auto',
     enabled: 'tad_enabled',
     inject: 'tad_inject',
@@ -13,7 +14,7 @@ const STORAGE = {
 const PROMPT_KEY = 'tts-afterdrought-dialogue';
 const LEGACY_API = 'http://127.0.0.1:7860';
 const DEFAULT_API = 'http://127.0.0.1:9881';
-const FALLBACK_EMOTIONS = ['平静', '温柔', '开心', '生气', '愤怒', '悲伤', '害怕', '惊讶', '害羞', '冷淡', '耳语'];
+const FALLBACK_EMOTIONS = ['平静', '日常', '自然', '温柔', '轻松', '开心', '高兴', '喜悦', '兴奋', '狂喜', '不满', '不悦', '恼火', '生气', '愤怒', '暴怒', '恼羞成怒', '气愤', '委屈地生气', '压抑怒火', '冷淡不满', '失落', '难过', '悲伤', '伤心', '低落', '沮丧', '绝望', '心碎', '悲伤地微笑', '强忍悲伤', '哽咽', '哭泣', '痛哭', '紧张', '不安', '担忧', '害怕', '恐惧', '惊恐', '慌张', '焦虑', '忐忑', '如释重负', '嫌弃', '厌恶', '反感', '鄙夷', '嫌弃地吐槽', '无奈', '惊讶', '震惊', '惊喜', '意外', '疑惑', '困惑', '难以置信', '恍然大悟', '害羞', '羞涩', '脸红', '不好意思', '羞恼', '撒娇', '依恋', '宠溺', '暧昧', '温存', '深情', '吃醋', '占有欲', '委屈撒娇', '期待', '眷恋', '调皮', '俏皮', '得意', '自信', '傲娇', '温柔地责备', '无可奈何', '苦笑', '自嘲', '认真', '严肃', '坚定', '疲惫', '困倦', '慵懒', '敷衍', '冷淡', '尴尬', '释然', '感动', '欣慰', '幸福', '温暖', '耳语'];
 let emotionNames = FALLBACK_EMOTIONS.slice();
 
 const BARS_HTML = '<span class="sovits-voice-waves"><span class="sovits-voice-bar"></span><span class="sovits-voice-bar"></span><span class="sovits-voice-bar"></span></span>';
@@ -39,11 +40,22 @@ let refreshing = false;
 function apiBase() {
     let stored = (localStorage.getItem(STORAGE.api) || '').trim();
     if (!stored || stored.replace(/\/+$/, '') === LEGACY_API) stored = DEFAULT_API;
-    return stored
-        .replace(/\/+$/, '')
-        .replace(/\/api\/v1$/, '')
-        .replace(/\/v1$/, '')
-        .replace(/\/tts$/, '');
+    let base = stored.replace(/\/+$/, '').replace(/\/api\/v1$/, '').replace(/\/v1$/, '');
+    try {
+        const url = new URL(base);
+        const local = url.hostname === '127.0.0.1' || url.hostname === 'localhost';
+        let path = url.pathname.replace(/\/+$/, '');
+        if (local && path === '/tts') path = '';
+        base = url.origin + path;
+    } catch { /* 不是绝对地址就用整理过的字符串 */ }
+    return base;
+}
+
+function apiHeaders(extra) {
+    const headers = extra ? { ...extra } : {};
+    const token = (localStorage.getItem(STORAGE.token) || '').trim();
+    if (token) headers.authorization = `Bearer ${token}`;
+    return headers;
 }
 
 function enabled() {
@@ -138,12 +150,13 @@ function promptEmotionNames() {
 
 async function loadEmotionNames() {
     try {
-        const response = await fetch(`${apiBase()}/v1/emotions`);
+        const response = await fetch(`${apiBase()}/v1/emotions`, { headers: apiHeaders() });
         if (!response.ok) return;
         const data = await response.json();
         if (Array.isArray(data.names) && data.names.length) {
             emotionNames = data.names;
             applyDialoguePrompt();
+            paintControls();
         }
     } catch { /* 网关不在时继续用短列表 */ }
 }
@@ -154,14 +167,18 @@ function dialoguePrompt() {
     return `[对白语音标记]
 ${who}角色真正说出口的每一句都要打上语音标记，否则无法朗读。旁白、动作、心理活动保持普通正文，不要放进标记。
 
-格式，标记和这句对白在同一行：
+整句只有一种情绪时，标记和这句对白在同一行：
 [角色名, 情绪] 对白内容
 
+同一句里情绪变了，仍然只写一行。对白照常写在标记后面，行末用导演块按说话顺序拆开，每段各用一个情绪：
+[甘雨, 惊讶] 你怎么……我、我没有那个意思〖vd:{"segments":[{"text":"你怎么……","emotion":"惊讶","pause_after_ms":200},{"text":"我、我没有那个意思","emotion":"害羞"}]}〗
+segments 里的 text 按顺序拼起来要等于标记后的对白。最后一段省略 pause_after_ms。整句只有一种情绪时不要写 segments。
+
 规则：
-1. 同一个人全篇只用同一个角色名。这个名字要和语音网关里的角色 id 或显示名一致。
-2. 情绪只能从这些词里选一个：default、${promptEmotionNames().join('、')}。听不出明显情绪时用 default。
+1. 同一个人全篇只用同一个角色名。这个名字要和语音网关里的角色 id、显示名或别名一致。
+2. 情绪只能从这些词里选：${promptEmotionNames().join('、')}。听不出明显情绪时，标记里写 default，不要另造词。
 3. 标记后面同一行只写这一句口头对白。旁白另起一行，写在标记外面。
-4. 语气不是情绪。需要耳语、放慢或冷淡时，在同一行末尾追加 〖vd:{"delivery":{"intensity":"whisper","pace":"slow"}}〗。intensity 只能是 normal、gentle、soft、whisper、firm、cold、teasing、hesitant、excited。写错会被忽略，对白照常朗读。
+4. 语气不是情绪。需要放轻、放慢或换一种口气时，写在同一行末尾：〖vd:{"delivery":{"intensity":"whisper","pace":"slow"}}〗。intensity 只能是 normal、gentle、soft、whisper、firm、cold、teasing、hesitant、excited、crying、laughing。pace 只能是 fast、normal、gentle、slow。分段和语气可以写在同一个导演块里。写错会被忽略，对白照常朗读。
 
 示例：
 她把目光挪开。
@@ -675,7 +692,7 @@ async function fetchAudio(segment) {
     try {
         response = await fetch(`${apiBase()}/v1/tts`, {
             method: 'POST',
-            headers: { 'content-type': 'application/json' },
+            headers: apiHeaders({ 'content-type': 'application/json' }),
             body: JSON.stringify(body),
         });
     } catch {
@@ -1183,6 +1200,7 @@ function paintControls() {
         });
     };
     setValue('api', apiBase());
+    setValue('token', localStorage.getItem(STORAGE.token) || '');
     setValue('enabled', enabled());
     setValue('auto', autoPlay());
     setValue('render', renderMode());
@@ -1216,6 +1234,7 @@ function commitSettings(patch) {
     const settings = loadSettings();
     let refreshView = false;
     if (patch.api !== undefined) localStorage.setItem(STORAGE.api, patch.api.trim() || DEFAULT_API);
+    if (patch.token !== undefined) localStorage.setItem(STORAGE.token, patch.token.trim());
     if (patch.enabled !== undefined) localStorage.setItem(STORAGE.enabled, patch.enabled ? '1' : '0');
     if (patch.auto !== undefined) localStorage.setItem(STORAGE.auto, patch.auto ? '1' : '0');
     if (patch.render !== undefined) localStorage.setItem(STORAGE.render, patch.render === 'line' ? 'line' : 'bubble');
@@ -1463,7 +1482,7 @@ async function refreshStatus() {
     let text = '语音网关未就绪';
     let ok = false;
     try {
-        const response = await fetch(`${apiBase()}/health`);
+        const response = await fetch(`${apiBase()}/health`, { headers: apiHeaders() });
         if (!response.ok) throw new Error(String(response.status));
         const data = await response.json().catch(() => ({}));
         if (data.studio && data.studio.online === false) {
@@ -1504,10 +1523,23 @@ function appendSettingsFields(parent) {
     hint.className = 'tad-hint';
     hint.textContent = '音色在网关的角色配置里。对白标记里的角色名用来选择音色，这里不再上传参考音频。';
 
+    const tokenLabel = document.createElement('label');
+    tokenLabel.className = 'tad-field';
+    tokenLabel.append(document.createTextNode('口令'));
+    const tokenInput = document.createElement('input');
+    tokenInput.type = 'password';
+    tokenInput.className = 'text_pole';
+    tokenInput.dataset.tad = 'token';
+    tokenInput.autocomplete = 'off';
+    tokenLabel.append(tokenInput);
+
     apiInput.addEventListener('change', () => commitSettings({ api: apiInput.value }));
+    tokenInput.addEventListener('change', () => commitSettings({ token: tokenInput.value }));
     check.addEventListener('click', () => refreshStatus());
 
-    parent.append(status, apiLabel, check, hint, playbackModule(), promptModule(), notifyModule(), cacheModule(), regexModule());
+    hint.textContent = '本机填 http://127.0.0.1:9881，口令留空。公网填 https://zzzbzhang.top/tts，口令填代理的 PROXY_TOKEN。';
+
+    parent.append(status, apiLabel, tokenLabel, check, hint, playbackModule(), promptModule(), notifyModule(), cacheModule(), regexModule());
     paintControls();
     renderRegexLists(parent);
 }
