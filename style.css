@@ -1,4 +1,33 @@
-.voice-bubble {
+#tad-bubble-menu {
+    position: fixed;
+    z-index: 20002;
+    display: flex;
+    flex-direction: column;
+    min-width: 120px;
+    padding: 4px;
+    border-radius: 10px;
+    background: var(--SmartThemeBlurTintColor, #1a1a1a);
+    color: var(--SmartThemeBodyColor, #eee);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+#tad-bubble-menu[hidden] {
+    display: none;
+}
+
+#tad-bubble-menu button {
+    border: 0;
+    background: transparent;
+    color: inherit;
+    text-align: left;
+    padding: 6px 8px;
+    cursor: pointer;
+    font: inherit;
+}
+
+#tad-bubble-menu button:hover {
+    background: color-mix(in srgb, currentColor 10%, transparent);
+}
     display: inline-flex;
     align-items: center;
     justify-content: space-between;

@@ -40,6 +40,8 @@ const TEXT_EMOTIONS = {
 };
 
 const BARS_HTML = '<span class="sovits-voice-waves"><span class="sovits-voice-bar"></span><span class="sovits-voice-bar"></span><span class="sovits-voice-bar"></span></span>';
+const BUBBLE_ROOTS = '.mes_text, .message-body, .markdown-content, #chat .mes_text, .mes .text';
+const LONG_PRESS_MS = 550;
 const SYSTEM_KEYWORDS = /^(?:ONSTAGE|RECALL|ARCHIVE|FLOOR|STATUS|SYS|VAR|STAGE|SYSTEM|CONFIG|DATA|MEMORY|DATABASE|DEBUG|INFO|ERROR|WARN|TAG|SETTING|VALUE|VARIABLE)$/i;
 
 const memory = new Map();
@@ -136,19 +138,6 @@ function escapeHtmlAttr(value) {
         .replace(/>/g, '&gt;');
 }
 
-function knownSpeakers() {
-    const names = new Set();
-    const add = (name) => {
-        const clean = String(name || '').trim().toLowerCase();
-        if (clean) names.add(clean);
-    };
-    add(currentCharacterName());
-    try {
-        add(globalThis.SillyTavern?.getContext?.()?.name2);
-    } catch { /* 没有角色上下文时，无引号对白只在名单为空时收下 */ }
-    return names;
-}
-
 function visibleText(value) {
     return String(value || '').replace(/<[^>]+>|&lt;[^&]+&gt;|&nbsp;/gi, ' ').replace(/\s+/g, ' ').trim();
 }
@@ -175,7 +164,6 @@ function parseTextToBubbles(html) {
         return `[${name}, default]`;
     });
 
-    const known = knownSpeakers();
     const tagRe = /[\[【]([^\],:【】\[\]\n]{1,30})\s*[,，]\s*([^\]】\n]{1,30})[\]】]/g;
     let result = '';
     let lastIndex = 0;
@@ -195,26 +183,27 @@ function parseTextToBubbles(html) {
 
         const stripped = source.slice(tagEnd).replace(/^(?:<[^>]+>|[:：\s]|&nbsp;)+/gi, '');
         let spoken = '';
-        let quoted = false;
         const quoteMatch = stripped.match(/^(?:([“"「『]|&ldquo;|&quot;|&#8220;)([\s\S]*?)([”"」』]|&rdquo;|&quot;|&#8221;))/i);
-        if (quoteMatch && quoteMatch[2]) {
-            spoken = visibleText(quoteMatch[2]);
-            quoted = true;
-        }
-        if (!spoken && (known.has(speaker.toLowerCase()) || known.size === 0)) {
+        if (quoteMatch && quoteMatch[2]) spoken = visibleText(quoteMatch[2]);
+        if (!spoken) {
             const plain = stripped.match(/^([^<\[【\n\r]+)/);
             const candidate = plain ? visibleText(plain[1]) : '';
             if (candidate.length > 1) spoken = candidate;
         }
-        if (!spoken || (!quoted && known.size > 0 && !known.has(speaker.toLowerCase()))) continue;
+        if (!spoken) continue;
 
         matched = true;
         result += source.slice(lastIndex, match.index);
         lastIndex = tagEnd;
         result += buildBubbleHtml(speaker, emotion || 'default', spoken);
     }
-    if (!matched) return html;
-    return result + source.slice(lastIndex);
+    const tagged = matched ? result + source.slice(lastIndex) : source;
+    const withLegacy = tagged.replace(/(\s*)\[TTSVoice[:：]\s*([^:：]+)\s*[:：]\s*([^:：]*)\s*[:：]\s*(.*?)\]/gi, (full, space, name, emotion, text) => {
+        const spoken = visibleText(text);
+        if (!spoken) return full;
+        return `${space || ''}${buildBubbleHtml(name.trim(), emotion.trim() || 'default', spoken)}`;
+    });
+    return withLegacy === html ? html : withLegacy;
 }
 
 function emotionFields(emotion) {
@@ -403,10 +392,11 @@ async function playBubble(btn) {
     const url = btn?.dataset.audioUrl;
     if (!url) return;
     const token = ++playToken;
+    const same = bubblesByKey(btn.dataset.key);
     document.querySelectorAll('.voice-bubble.playing').forEach((node) => node.classList.remove('playing'));
-    btn.classList.add('playing');
+    same.forEach((node) => node.classList.add('playing'));
     await playUrl(url);
-    if (token === playToken) btn.classList.remove('playing');
+    if (token === playToken) same.forEach((node) => node.classList.remove('playing'));
 }
 
 async function pump() {
@@ -436,7 +426,7 @@ async function pump() {
                     node.removeAttribute('title');
                 });
                 if (btn.dataset.autoplay === '1') await playBubble(btn);
-            } catch (error) {
+        } catch (error) {
                 bubblesByKey(key).forEach((node) => {
                     node.dataset.status = 'error';
                     node.classList.remove('loading');
@@ -453,8 +443,13 @@ async function pump() {
     }
 }
 
+function lastMesText() {
+    const nodes = document.querySelectorAll('.mes_text');
+    return nodes.length ? nodes[nodes.length - 1] : null;
+}
+
 function scheduleLast(autoplay) {
-    const last = document.querySelector('#chat .mes:last-child .mes_text');
+    const last = lastMesText();
     if (!last) return;
     last.querySelectorAll('.voice-bubble').forEach((btn) => {
         if (autoplay && btn.dataset.status !== 'ready' && btn.dataset.status !== 'error') btn.dataset.autoplay = '1';
@@ -465,27 +460,161 @@ function scheduleLast(autoplay) {
 
 function scan() {
     if (!enabled()) return;
-    const lastMes = document.querySelector('#chat .mes:last-child');
-    const streaming = generating();
-    let changedLast = false;
-    document.querySelectorAll('#chat .mes_text').forEach((node) => {
-        const mes = node.closest('.mes');
-        if (!mes || mes.getAttribute('is_user') === 'true' || mes.getAttribute('is_system') === 'true') return;
-        if (streaming && mes === lastMes) return;
+    let changed = false;
+    document.querySelectorAll(BUBBLE_ROOTS).forEach((node) => {
+        if (!node.isConnected || node.closest('.voice-bubble')) return;
         const html = node.innerHTML;
         if (!html || (!html.includes('[') && !html.includes('【'))) return;
         const next = parseTextToBubbles(html);
         if (next === html) return;
         node.innerHTML = next;
-        if (mes === lastMes) changedLast = true;
+        changed = true;
     });
-    if (changedLast) scheduleLast(playNewReply);
-    if (!streaming) playNewReply = false;
+    if (changed) {
+        const autoplay = playNewReply;
+        setTimeout(() => scheduleLast(autoplay), 100);
+    }
+    if (!generating()) playNewReply = false;
+}
+
+function rerollBubble(btn) {
+    if (!btn) return;
+    const emotion = btn.dataset.voiceEmotion || 'default';
+    const text = btn.dataset.text || '';
+    if (voiceName) memory.delete(`${voiceName}\n${emotion}\n${text}`);
+    bubblesByKey(btn.dataset.key).forEach((node) => {
+        node.dataset.status = 'waiting';
+        node.removeAttribute('data-audio-url');
+        node.classList.remove('loading', 'playing', 'error');
+    });
+    enqueue(btn, { autoplay: false });
+    pump();
+}
+
+function downloadBubble(btn) {
+    const url = btn?.dataset.audioUrl;
+    if (!url) return;
+    const link = document.createElement('a');
+    const speaker = btn.dataset.voiceName || 'voice';
+    link.href = url;
+    link.download = `${speaker}.wav`;
+    link.click();
+}
+
+function bindBubbleMenu() {
+    const menu = document.createElement('div');
+    menu.id = 'tad-bubble-menu';
+    menu.hidden = true;
+    const download = document.createElement('button');
+    download.type = 'button';
+    download.textContent = '下载语音';
+    const reroll = document.createElement('button');
+    reroll.type = 'button';
+    reroll.textContent = '重新生成';
+    menu.append(download, reroll);
+    document.body.append(menu);
+
+    let target = null;
+    let press = null;
+    let suppressUntil = 0;
+
+    function closeMenu() {
+        menu.hidden = true;
+        target = null;
+    }
+
+    function openMenu(btn, x, y) {
+        if (btn.dataset.status !== 'ready') return;
+        target = btn;
+        menu.hidden = false;
+        const width = 140;
+        const height = 72;
+        menu.style.left = `${Math.max(8, Math.min(x + 8, window.innerWidth - width - 8))}px`;
+        menu.style.top = `${Math.max(8, Math.min(y + 8, window.innerHeight - height - 8))}px`;
+    }
+
+    download.addEventListener('click', (event) => {
+        event.stopPropagation();
+        downloadBubble(target);
+        closeMenu();
+    });
+    reroll.addEventListener('click', (event) => {
+        event.stopPropagation();
+        const btn = target;
+        closeMenu();
+        if (btn && window.confirm('确定要重新生成这段语音吗？')) rerollBubble(btn);
+    });
+    document.addEventListener('click', (event) => {
+        if (!menu.hidden && !menu.contains(event.target)) closeMenu();
+    });
+    document.addEventListener('contextmenu', (event) => {
+        const btn = event.target.closest?.('.voice-bubble');
+        if (!btn) return;
+        event.preventDefault();
+        openMenu(btn, event.clientX, event.clientY);
+    });
+    document.addEventListener('pointerdown', (event) => {
+        const btn = event.target.closest?.('.voice-bubble');
+        if (!btn || event.pointerType === 'mouse' || event.button !== 0 || btn.dataset.status !== 'ready') return;
+        press = { id: event.pointerId, x: event.clientX, y: event.clientY, btn, triggered: false };
+        press.timer = setTimeout(() => {
+            if (!press) return;
+            press.triggered = true;
+            suppressUntil = Date.now() + 900;
+            openMenu(press.btn, press.x, press.y);
+        }, LONG_PRESS_MS);
+    });
+    document.addEventListener('pointermove', (event) => {
+        if (!press || event.pointerId !== press.id) return;
+        if (Math.hypot(event.clientX - press.x, event.clientY - press.y) > 12) {
+            clearTimeout(press.timer);
+            press = null;
+        }
+    });
+    const endPress = () => {
+        if (!press) return;
+        clearTimeout(press.timer);
+        if (press.triggered) suppressUntil = Date.now() + 900;
+        press = null;
+    };
+    document.addEventListener('pointerup', endPress);
+    document.addEventListener('pointercancel', endPress);
+
+    document.addEventListener('click', (event) => {
+        const btn = event.target.closest?.('.voice-bubble');
+        if (!btn) return;
+        if (Date.now() < suppressUntil) {
+            event.preventDefault();
+            event.stopPropagation();
+            return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        if (!enabled()) return;
+        if (btn.classList.contains('playing')) {
+            stopPlayback();
+            return;
+        }
+        if (btn.dataset.status === 'ready') {
+            if (!btn.dataset.audioUrl) {
+                btn.dataset.status = 'error';
+                btn.classList.remove('playing');
+                return;
+            }
+            playBubble(btn);
+            return;
+        }
+        if (btn.dataset.status !== 'waiting' && btn.dataset.status !== 'error') return;
+        btn.dataset.status = 'waiting';
+        btn.classList.remove('error');
+        enqueue(btn, { autoplay: false });
+        pump();
+    });
 }
 
 function scheduleScan() {
     clearTimeout(scanTimer);
-    scanTimer = setTimeout(() => scan(), 300);
+    scanTimer = setTimeout(() => scan(), 0);
 }
 
 function voiceHintText() {
@@ -770,34 +899,9 @@ function init() {
     if (event_types.APP_READY) {
         eventSource.on(event_types.APP_READY, mountExtensionSettings);
     }
-    const chat = document.querySelector('#chat');
-    if (chat) {
-        const observer = new MutationObserver(scheduleScan);
-        observer.observe(chat, { childList: true, subtree: true, characterData: true });
-    }
-    document.addEventListener('click', (event) => {
-        const btn = event.target.closest?.('.voice-bubble');
-        if (!btn || !btn.closest('#chat')) return;
-        event.preventDefault();
-        event.stopPropagation();
-        if (!enabled()) return;
-        if (btn.classList.contains('playing')) {
-            stopPlayback();
-            return;
-        }
-        if (btn.dataset.status === 'ready') {
-            playBubble(btn);
-            return;
-        }
-        if (btn.dataset.status === 'queued' || btn.dataset.status === 'generating') {
-            btn.dataset.autoplay = '1';
-            return;
-        }
-        btn.dataset.status = 'waiting';
-        btn.classList.remove('error');
-        enqueue(btn, { autoplay: true });
-        pump();
-    });
+    bindBubbleMenu();
+    const observer = new MutationObserver(scheduleScan);
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
     scan();
 
     if (event_types.GENERATION_ENDED) {
@@ -805,6 +909,10 @@ function init() {
             speakableGeneration = true;
             playNewReply = autoPlay();
             scan();
+            if (!autoPlay()) return;
+            lastMesText()?.querySelectorAll('.voice-bubble').forEach((btn) => {
+                if (btn.dataset.status !== 'ready' && btn.dataset.status !== 'error') btn.dataset.autoplay = '1';
+            });
         });
     }
     if (event_types.GENERATION_STARTED) {
