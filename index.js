@@ -243,7 +243,7 @@ ${characterRosterText()}
 [甘雨, 害羞] “你、你怎么突然说这种话……”
 [甘雨, default] “今天的工作终于结束了。”
 
-每句对白单独一行，标记和对白在同一行。引号用中文双引号，里面只能是说出口的话。不要把动作、心理或旁白放进引号，也不要接在标记后面。不要把多句独立对白并成一条标记。
+标记紧贴这句对白。对白可以单独成行，也可以和旁白写在同一段里，不必为了标记换行。引号用中文双引号，里面只能是说出口的话。不要把动作、心理或旁白放进引号，也不要接在标记后面。不要把多句独立对白并成一条标记。
 
 同一句里情绪变了，整句只放进 segments，标记里不写情绪，外面不要再写对白或引号，也不要把旁白放进 segments：
 [角色名] 〖vd:{"segments":[{"text":"第一段对白","emotion":"情绪","pause_after_ms":200},{"text":"第二段对白","emotion":"情绪"}]}〗
@@ -278,7 +278,10 @@ JSON 使用双引号，不要尾随逗号。不要输出格式说明，不要用
 她稍微停顿了一下，随后恢复了平日的语气。
 [甘雨, default] “今天的工作终于结束了。”
 甘雨轻轻点头，声音也放柔了些。
-[甘雨, 温柔] “嗯，那我们走吧。”`.trim();
+[甘雨, 温柔] “嗯，那我们走吧。”
+
+同一段里也可以夹着旁白。每一句对白各自一个标记，中间的旁白保持普通正文：
+[胡桃, 惊喜] “专程来找我的？”胡桃一把将两扇门板推得大敞，红褐色的双马尾随着她大幅度的转身晃晃悠悠。[胡桃] 〖vd:{"segments":[{"text":"快请进快请进！本堂主平时想拉甘雨姐姐喝杯粗茶比登天还难呢。","emotion":"调皮","pause_after_ms":280},{"text":"久旱对吧？能把这位加班狂人从文书堆里拐出来，你面子可真不小。","emotion":"得意"}]}〗`.trim();
 }
 
 function promptRole(role) {
@@ -447,7 +450,7 @@ function presentDialogue(text) {
 function buildLineHtml(speaker, emotion, text, settled = true, director = null) {
     const state = voiceAttrs(speaker, emotion, text, settled, director);
     const title = emotion && emotion !== 'default' ? `${speaker} · ${emotion}` : speaker;
-    return `<span class="tad-line tad-voice${state.loading}"${state.attrs} title="${escapeHtmlAttr(title)}"><span class="tad-line-name">${escapeHtmlAttr(speaker)}</span>： <span class="tad-line-body">${escapeHtmlAttr(presentDialogue(text))}</span><span class="tad-line-mark">${BARS_HTML}</span></span>`;
+    return `<span class="tad-line tad-voice${state.loading}"${state.attrs} title="${escapeHtmlAttr(title)}"><span class="tad-line-body">${escapeHtmlAttr(presentDialogue(text))}</span><span class="tad-line-mark">${BARS_HTML}</span></span>`;
 }
 
 function speakerKnown(name) {
@@ -458,20 +461,13 @@ function speakerKnown(name) {
         .some((part) => String(part || '').trim().toLowerCase() === key));
 }
 
-function keptLine(speaker, text, line) {
-    const spoken = presentDialogue(text);
-    return line && speaker ? `${speaker}： ${spoken}` : spoken;
-}
-
 function keptHtml(speaker, text) {
-    return `<span class="tad-kept">${escapeHtmlAttr(keptLine(speaker, text, renderMode() === 'line'))}</span>`;
+    return `<span class="tad-kept">${escapeHtmlAttr(presentDialogue(text))}</span>`;
 }
 
 function keptFromNode(node) {
     if (node.classList.contains('tad-line')) {
-        const name = node.querySelector('.tad-line-name')?.textContent || '';
-        const body = node.querySelector('.tad-line-body')?.textContent || node.dataset.text || '';
-        return name ? `${name}：${body}` : body;
+        return node.querySelector('.tad-line-body')?.textContent || presentDialogue(node.dataset.text || '');
     }
     return presentDialogue(node.dataset.text || '');
 }
@@ -562,6 +558,8 @@ function extractSpoken(source, tagEnd) {
             const close = source.slice(i).match(closePattern);
             if (close) {
                 i += close[0].length;
+                const tail = source.slice(i).match(/^<\/q\s*>/i);
+                if (tail) i += tail[0].length;
                 closed = true;
                 break;
             }
@@ -750,7 +748,12 @@ function renderDialogueHtml(html) {
             searchFrom = lastIndex;
             result += buildVoiceHtml(speaker, emotion || 'default', display, spoken.settled, directed.director);
         } else {
-            result += source.slice(tagEnd, spoken.end).replace(/〖vd:[\s\S]*?〗/g, '');
+            const visible = source.slice(tagEnd, spoken.end)
+                .replace(/〖vd:[\s\S]*?〗/g, '')
+                .replace(/^(?:\s|&nbsp;)*/, '')
+                .replace(/^<q\b[^>]*>/i, '')
+                .replace(/<\/q\s*>$/i, '');
+            result += visible;
             if (!gatewayCharacters.length || speakerKnown(speaker)) {
                 result += ' ' + buildBubbleHtml(speaker, emotion || 'default', display, spoken.settled, directed.director);
             }
@@ -1787,16 +1790,76 @@ function appendSettingsFields(parent) {
     check.addEventListener('click', () => refreshStatus());
 
     hint.textContent = '本机填 http://127.0.0.1:9881，口令留空。公网填 https://zzzbzhang.top/tts，口令填代理的 PROXY_TOKEN。';
+    check.classList.add('tad-primary');
 
-    parent.append(status, apiLabel, tokenLabel, check, hint, playbackModule(), promptModule(), notifyModule(), cacheModule(), regexModule());
+    const booth = document.createElement('div');
+    booth.className = 'tad-booth';
+    booth.append(status, apiLabel, tokenLabel, check, hint);
+
+    const desk = document.createElement('div');
+    desk.className = 'tad-desk';
+    const index = document.createElement('div');
+    index.className = 'tad-index';
+    index.setAttribute('role', 'tablist');
+    index.setAttribute('aria-label', '设置分类');
+    for (const [id, label] of SETTINGS_TABS) {
+        const tab = document.createElement('button');
+        tab.type = 'button';
+        tab.className = 'tad-index-btn';
+        tab.dataset.tadTab = id;
+        tab.setAttribute('role', 'tab');
+        tab.textContent = label;
+        tab.addEventListener('click', () => showSettingsTab(id));
+        index.append(tab);
+    }
+    index.addEventListener('keydown', (event) => {
+        const step = event.key === 'ArrowDown' || event.key === 'ArrowRight'
+            ? 1
+            : (event.key === 'ArrowUp' || event.key === 'ArrowLeft' ? -1 : 0);
+        if (!step) return;
+        event.preventDefault();
+        const ids = SETTINGS_TABS.map(([id]) => id);
+        const next = ids[(ids.indexOf(settingsTab) + step + ids.length) % ids.length];
+        showSettingsTab(next);
+        index.querySelector(`[data-tad-tab="${next}"]`)?.focus();
+    });
+    const panels = document.createElement('div');
+    panels.className = 'tad-panels';
+    panels.append(playbackModule(), promptModule(), notifyModule(), cacheModule(), regexModule());
+    desk.append(index, panels);
+
+    parent.append(booth, desk);
     paintControls();
     renderRegexLists(parent);
+    showSettingsTab(settingsTab);
 }
 
-function moduleBox(title) {
+const SETTINGS_TABS = [
+    ['play', '播放'],
+    ['prompt', '提示词'],
+    ['notify', '通知'],
+    ['cache', '缓存'],
+    ['filter', '过滤'],
+];
+let settingsTab = 'play';
+
+function showSettingsTab(tab) {
+    settingsTab = SETTINGS_TABS.some(([id]) => id === tab) ? tab : 'play';
+    document.querySelectorAll('[data-tad-tab]').forEach((node) => {
+        const on = node.dataset.tadTab === settingsTab;
+        node.classList.toggle('is-on', on);
+        node.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    document.querySelectorAll('[data-tad-panel]').forEach((node) => {
+        node.classList.toggle('is-on', node.dataset.tadPanel === settingsTab);
+    });
+}
+
+function moduleBox(title, tab) {
     const box = document.createElement('section');
     box.className = 'tad-module';
-    const heading = document.createElement('div');
+    box.dataset.tadPanel = tab;
+    const heading = document.createElement('h4');
     heading.className = 'tad-module-title';
     heading.textContent = title;
     box.append(heading);
@@ -1833,7 +1896,7 @@ function selectField(label, name, options) {
 }
 
 function playbackModule() {
-    const box = moduleBox('播放与自动化');
+    const box = moduleBox('播放与自动化', 'play');
     const switches = document.createElement('div');
     switches.className = 'tad-switches';
     switches.append(
@@ -1878,7 +1941,7 @@ function playbackModule() {
 }
 
 function promptModule() {
-    const box = moduleBox('提示词管理');
+    const box = moduleBox('提示词管理', 'prompt');
     const switches = document.createElement('div');
     switches.className = 'tad-switches';
     switches.append(switchRow('启用提示词', 'prompt-enabled'));
@@ -1901,7 +1964,7 @@ function promptModule() {
     state.dataset.tad = 'prompt-state';
     const reset = document.createElement('button');
     reset.type = 'button';
-    reset.className = 'tad-check';
+    reset.className = 'tad-check tad-primary';
     reset.textContent = '恢复默认提示词';
     switches.addEventListener('change', (event) => {
         if (event.target instanceof HTMLInputElement) commitSettings({ prompt: { enabled: event.target.checked } });
@@ -1918,7 +1981,7 @@ function promptModule() {
 }
 
 function notifyModule() {
-    const box = moduleBox('酒馆通知');
+    const box = moduleBox('酒馆通知', 'notify');
     const switches = document.createElement('div');
     switches.className = 'tad-switches';
     switches.append(
@@ -1946,7 +2009,7 @@ function notifyModule() {
 }
 
 function cacheModule() {
-    const box = moduleBox('音频缓存');
+    const box = moduleBox('音频缓存', 'cache');
     const count = document.createElement('div');
     count.className = 'tad-hint';
     const countValue = document.createElement('span');
@@ -1989,7 +2052,7 @@ function cacheModule() {
 }
 
 function regexModule() {
-    const box = moduleBox('正则过滤');
+    const box = moduleBox('正则过滤', 'filter');
     const note = document.createElement('div');
     note.className = 'tad-hint';
     note.textContent = '抽对白之前按顺序替换。默认会去掉 think 块。';
