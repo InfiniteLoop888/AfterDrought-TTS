@@ -180,16 +180,49 @@ function characterRosterText() {
     return `语音网关里已有这些角色。表里的人必须用列出的显示名，不要改成别名、昵称或代词：\n${lines.join('\n')}\n没有出现在这张表里的人，按剧情写出全名，不要只写姓、职位或「他」「她」。同一个人全篇只用这一个名字。`;
 }
 
+function rosterSignature(list) {
+    return list.map((item) => {
+        const name = String(item.display_name || item.character_id || '').trim();
+        const aliases = (Array.isArray(item.aliases) ? item.aliases : [])
+            .map((alias) => String(alias || '').trim())
+            .filter(Boolean)
+            .join('\u0001');
+        return `${name}\u0002${aliases}`;
+    }).join('\n');
+}
+
+let characterLoad = null;
+
 async function loadGatewayCharacters() {
-    try {
+    if (characterLoad) return characterLoad;
+    characterLoad = (async () => {
         const response = await fetch(`${apiBase()}/v1/characters`, { headers: apiHeaders() });
-        if (!response.ok) return;
+        if (!response.ok) return false;
         const data = await response.json();
-        if (!Array.isArray(data.characters)) return;
-        gatewayCharacters = data.characters.filter((item) => item && typeof item === 'object');
-        applyDialoguePrompt();
-        paintControls();
-    } catch { /* 网关不在时按剧情全名 */ }
+        if (!Array.isArray(data.characters)) return false;
+        const next = data.characters.filter((item) => item && typeof item === 'object');
+        const changed = rosterSignature(next) !== rosterSignature(gatewayCharacters);
+        gatewayCharacters = next;
+        releaseUnknownVoices();
+        if (changed) {
+            applyDialoguePrompt();
+            paintControls();
+        }
+        return changed;
+    })().catch(() => false);
+    try {
+        return await characterLoad;
+    } finally {
+        characterLoad = null;
+    }
+}
+
+function watchGatewayCharacters() {
+    const pull = () => {
+        if (document.visibilityState !== 'hidden') loadGatewayCharacters();
+    };
+    setInterval(pull, 3000);
+    document.addEventListener('visibilitychange', pull);
 }
 
 function dialoguePrompt() {
@@ -199,21 +232,21 @@ function dialoguePrompt() {
 整句只有一种情绪时，标记和这句对白在同一行：
 [角色名, 情绪] “对白内容”
 
-分段少用。只有这一句里情绪明显换了，才仍然只写一行，并在右引号前用导演块按说话顺序拆开：
-[甘雨, 惊讶] “你怎么……我、我没有那个意思〖vd:{"segments":[{"text":"你怎么……","emotion":"惊讶","pause_after_ms":200},{"text":"我、我没有那个意思","emotion":"害羞"}]}〗”
-segments 里的 text 按顺序拼起来要等于引号里的对白，不要把引号写进 text。最后一段省略 pause_after_ms。整句只有一种情绪时不要写 segments。
+分段少用。只有这一句里情绪换了，才不要写引号，标记里也不要写情绪。对白只放在导演块的 text 里，按说话顺序分段：
+[甘雨] 〖vd:{"segments":[{"text":"诶？你怎么突然回来了……","emotion":"惊讶","pause_after_ms":200},{"text":"我、我只是刚好在这里休息而已。","emotion":"害羞"}]}〗
+不要在这个格式外面再写一遍对白或引号。整句只有一种情绪时不要写 segments。
 
 规则：
 1. ${characterRosterText()}
 2. 情绪只能从这些词里选：${promptEmotionNames().join('、')}。听不出明显情绪时，标记里写 default，不要另造词。
-3. 标记后面同一行只写这一句口头对白，用 “” 包住。旁白另起一行，写在标记外面。
+3. 只有一种情绪时，标记后面同一行只写这一句口头对白，用 “” 包住。旁白另起一行，写在标记外面。
 4. 语气不是情绪。需要放轻、放慢或换一种口气时，写在右引号前面：〖vd:{"delivery":{"intensity":"whisper","pace":"slow"}}〗。intensity 只能是 normal、gentle、soft、whisper、firm、cold、teasing、hesitant、excited、crying、laughing。pace 只能是 fast、normal、gentle、slow。分段和语气可以写在同一个导演块里。写错会被忽略，对白照常朗读。
 
 示例：
 她把目光挪开。
 [甘雨, 害羞] “你、你怎么突然说这种话……”
 [甘雨, default] “今天的工作终于结束了。”
-[甘雨, 惊讶] “诶？你怎么突然回来了……我、我只是刚好在这里休息而已。〖vd:{"segments":[{"text":"诶？你怎么突然回来了……","emotion":"惊讶","pause_after_ms":200},{"text":"我、我只是刚好在这里休息而已。","emotion":"害羞"}]}〗”`.trim();
+[甘雨] 〖vd:{"segments":[{"text":"诶？你怎么突然回来了……","emotion":"惊讶","pause_after_ms":200},{"text":"我、我只是刚好在这里休息而已。","emotion":"害羞"}]}〗`.trim();
 }
 
 function promptRole(role) {
@@ -368,16 +401,73 @@ function buildBubbleHtml(speaker, emotion, text, settled = true, director = null
 function presentDialogue(text) {
     const value = String(text || '').trim();
     if (/^[「“"『]/.test(value)) return value;
-    return `「${value}」`;
+    return `“${value}”`;
 }
 
 function buildLineHtml(speaker, emotion, text, settled = true, director = null) {
     const state = voiceAttrs(speaker, emotion, text, settled, director);
     const title = emotion && emotion !== 'default' ? `${speaker} · ${emotion}` : speaker;
-    return `<span class="tad-line tad-voice${state.loading}"${state.attrs} title="${escapeHtmlAttr(title)}"><span class="tad-line-name">${escapeHtmlAttr(speaker)}</span>：<span class="tad-line-body">${escapeHtmlAttr(presentDialogue(text))}</span><span class="tad-line-mark">${BARS_HTML}</span></span>`;
+    return `<span class="tad-line tad-voice${state.loading}"${state.attrs} title="${escapeHtmlAttr(title)}"><span class="tad-line-name">${escapeHtmlAttr(speaker)}</span>： <span class="tad-line-body">${escapeHtmlAttr(presentDialogue(text))}</span><span class="tad-line-mark">${BARS_HTML}</span></span>`;
 }
 
+function speakerKnown(name) {
+    if (!gatewayCharacters.length) return true;
+    const key = String(name || '').trim().toLowerCase();
+    if (!key) return false;
+    return gatewayCharacters.some((item) => [item.character_id, item.display_name, ...(Array.isArray(item.aliases) ? item.aliases : [])]
+        .some((part) => String(part || '').trim().toLowerCase() === key));
+}
+
+function keptLine(speaker, text, line) {
+    const spoken = presentDialogue(text);
+    return line && speaker ? `${speaker}： ${spoken}` : spoken;
+}
+
+function keptHtml(speaker, text) {
+    return `<span class="tad-kept">${escapeHtmlAttr(keptLine(speaker, text, renderMode() === 'line'))}</span>`;
+}
+
+function keptFromNode(node) {
+    if (node.classList.contains('tad-line')) {
+        const name = node.querySelector('.tad-line-name')?.textContent || '';
+        const body = node.querySelector('.tad-line-body')?.textContent || node.dataset.text || '';
+        return name ? `${name}：${body}` : body;
+    }
+    return presentDialogue(node.dataset.text || '');
+}
+
+function forgetVoice(key) {
+    if (!key) return;
+    pending.delete(key);
+    const queued = genQueue.findIndex((item) => item.key === key);
+    if (queued >= 0) genQueue.splice(queued, 1);
+    const auto = autoList.indexOf(key);
+    if (auto >= 0) autoList.splice(auto, 1);
+}
+
+function releaseVoiceNode(node) {
+    const plain = document.createElement('span');
+    plain.className = 'tad-kept';
+    plain.textContent = keptFromNode(node);
+    forgetVoice(node.dataset.key);
+    node.replaceWith(plain);
+}
+
+function releaseVoice(key) {
+    bubblesByKey(key).forEach(releaseVoiceNode);
+}
+
+function releaseUnknownVoices() {
+    if (!gatewayCharacters.length) return;
+    document.querySelectorAll(`#chat ${VOICE_NODE}`).forEach((node) => {
+        if (!speakerKnown(node.dataset.voiceName)) releaseVoiceNode(node);
+    });
+}
+
+class SkipVoice extends Error {}
+
 function buildVoiceHtml(speaker, emotion, text, settled = true, director = null) {
+    if (gatewayCharacters.length && !speakerKnown(speaker)) return keptHtml(speaker, text);
     if (renderMode() === 'line') return buildLineHtml(speaker, emotion, text, settled, director);
     return buildBubbleHtml(speaker, emotion, text, settled, director);
 }
@@ -515,6 +605,28 @@ function restoreVoiceWidgets(html, placeholders) {
     return html.replace(/\u0000tad(\d+)\u0000/g, (token, index) => placeholders[Number(index)] ?? token);
 }
 
+function readSegmentDirector(source, tagEnd) {
+    const start = skipLead(source, tagEnd);
+    if (!source.startsWith('〖vd:', start)) return null;
+    const close = source.indexOf('〗', start);
+    if (close === -1) return null;
+    const directed = takeDirector(source.slice(start, close + 1));
+    const text = segmentText(directed.director);
+    if (!text) return null;
+    return { text, director: directed.director, end: close + 1, settled: true };
+}
+
+function segmentEmotion(director) {
+    const item = director.segments.find((part) => part && part.emotion != null && part.emotion !== '');
+    const emotion = item && item.emotion;
+    if (typeof emotion === 'string' && emotion.trim()) return emotion.trim();
+    if (emotion && typeof emotion === 'object') {
+        const preset = emotion.preset || emotion.name;
+        if (preset) return String(preset).trim();
+    }
+    return 'default';
+}
+
 function renderDialogueHtml(html) {
     let source = applyRegexFilters(html).replace(/[\[【]([^\],:【】\[\]\n]{1,30})\s*[,，]\s*(?:New|new)[\]】]/g, (match, speaker) => {
         const name = speaker.trim();
@@ -523,33 +635,71 @@ function renderDialogueHtml(html) {
     });
 
     const lineMode = renderMode() === 'line';
-    const tagRe = /[\[【]([^\],:【】\[\]\n]{1,30})\s*[,，]\s*([^\]】\n]{1,30})[\]】]/g;
     let result = '';
     let lastIndex = 0;
+    let searchFrom = 0;
     let matched = false;
-    let match;
-    while ((match = tagRe.exec(source)) !== null) {
-        if (match.index < lastIndex) continue;
-        const speaker = match[1].trim();
-        const emotion = match[2].trim();
-        const tagEnd = match.index + match[0].length;
-        if (!speaker || emotion.toLowerCase() === 'new' || speaker.toLowerCase().startsWith('tts')) continue;
+    while (searchFrom < source.length) {
+        const emotionRe = /[\[【]([^\],:【】\[\]\n]{1,30})\s*[,，]\s*([^\]】\n]{1,30})[\]】]/g;
+        emotionRe.lastIndex = searchFrom;
+        const emotionMatch = emotionRe.exec(source);
+        const bareRe = /[\[【]([^\],:【】\[\]\n]{1,30})[\]】]/g;
+        bareRe.lastIndex = searchFrom;
+        let bareMatch = null;
+        let segment = null;
+        while ((bareMatch = bareRe.exec(source)) !== null) {
+            segment = readSegmentDirector(source, bareMatch.index + bareMatch[0].length);
+            if (segment) break;
+        }
+        const emotionAt = emotionMatch ? emotionMatch.index : Infinity;
+        const bareAt = segment && bareMatch ? bareMatch.index : Infinity;
+        if (emotionAt === Infinity && bareAt === Infinity) break;
+
+        if (bareAt < emotionAt) {
+            const speaker = bareMatch[1].trim();
+            const tagEnd = bareMatch.index + bareMatch[0].length;
+            if (!speaker || SYSTEM_KEYWORDS.test(speaker) || /^\d+$/.test(speaker) || speaker.toLowerCase().startsWith('tts')) {
+                searchFrom = tagEnd;
+                continue;
+            }
+            matched = true;
+            result += source.slice(lastIndex, bareMatch.index);
+            lastIndex = segment.end;
+            searchFrom = segment.end;
+            result += buildVoiceHtml(speaker, segmentEmotion(segment.director), segment.text, segment.settled, segment.director);
+            continue;
+        }
+
+        const speaker = emotionMatch[1].trim();
+        const emotion = emotionMatch[2].trim();
+        const tagEnd = emotionMatch.index + emotionMatch[0].length;
         if (
-            /\d|[:：+\-/\\%=><]/.test(emotion)
+            !speaker
+            || emotion.toLowerCase() === 'new'
+            || speaker.toLowerCase().startsWith('tts')
+            || /\d|[:：+\-/\\%=><]/.test(emotion)
             || SYSTEM_KEYWORDS.test(speaker)
             || /^\d+$/.test(speaker)
             || emotion.length > 20
-        ) continue;
-
+        ) {
+            searchFrom = tagEnd;
+            continue;
+        }
         const spoken = extractSpoken(source, tagEnd);
-        if (!spoken) continue;
-
-        matched = true;
-        result += source.slice(lastIndex, match.index);
-        lastIndex = lineMode ? spoken.end : tagEnd;
+        if (!spoken) {
+            searchFrom = tagEnd;
+            continue;
+        }
         const directed = takeDirector(spoken.spoken);
         const display = directed.text || segmentText(directed.director);
-        if (!display) continue;
+        if (!display) {
+            searchFrom = tagEnd;
+            continue;
+        }
+        matched = true;
+        result += source.slice(lastIndex, emotionMatch.index);
+        lastIndex = lineMode ? spoken.end : tagEnd;
+        searchFrom = lastIndex;
         result += buildVoiceHtml(speaker, emotion || 'default', display, spoken.settled, directed.director);
     }
     const tagged = matched ? result + source.slice(lastIndex) : source;
@@ -729,6 +879,13 @@ async function fetchAudio(segment) {
     } catch {
         throw new Error('语音网关未就绪');
     }
+    const skipHeader = response.headers.get('x-tts-skip');
+    const type = response.headers.get('content-type') || '';
+    if (response.ok && (skipHeader === 'missing_character' || type.includes('json'))) {
+        const data = await response.json().catch(() => ({}));
+        if (data && data.skip === 'missing_character') throw new SkipVoice(data.detail || '未找到角色');
+        throw new Error((data && (data.detail || data.error)) || '语音生成失败');
+    }
     if (!response.ok) {
         let detail = `语音生成失败 (${response.status})`;
         try {
@@ -736,6 +893,7 @@ async function fetchAudio(segment) {
             const message = data.detail || data.error;
             if (typeof message === 'string') detail = message;
         } catch { /* 非 JSON 错误体 */ }
+        if (response.status === 404 && detail.startsWith('未找到角色')) throw new SkipVoice(detail);
         throw new Error(detail);
     }
     const blob = await response.blob();
@@ -926,6 +1084,10 @@ async function pump() {
                 const url = await fetchAudio(segment);
                 markReady(key, url);
             } catch (error) {
+                if (error instanceof SkipVoice) {
+                    releaseVoice(key);
+                    continue;
+                }
                 const message = error.message || String(error);
                 bubblesByKey(key).forEach((node) => {
                     node.dataset.status = 'error';
@@ -1797,6 +1959,7 @@ function openSheet() {
     refreshStatus();
     refreshCacheCount();
     renderRegexLists();
+    loadGatewayCharacters();
 }
 
 function closeSheet() {
@@ -1941,6 +2104,7 @@ function init() {
     applyDialoguePrompt();
     loadEmotionNames();
     loadGatewayCharacters();
+    watchGatewayCharacters();
     restoreFolder();
     refreshCacheCount();
     buildShell();
@@ -1971,11 +2135,11 @@ function init() {
         });
     }
     if (event_types.GENERATION_STARTED) {
-        eventSource.on(event_types.GENERATION_STARTED, (type) => {
+        eventSource.on(event_types.GENERATION_STARTED, async (type) => {
             streaming = type !== 'quiet';
             speakableGeneration = type !== 'quiet';
+            await loadGatewayCharacters();
             applyDialoguePrompt();
-            loadGatewayCharacters();
         });
     }
     if (event_types.CHAT_CHANGED) {
