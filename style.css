@@ -35,39 +35,140 @@
     color: #d4544a;
 }
 
-.tad-dock {
+#tad-fab {
     position: fixed;
-    right: 16px;
-    bottom: 72px;
-    z-index: 4000;
-    display: flex;
-    flex-direction: column;
-    align-items: flex-end;
-    gap: 6px;
-    font-size: 12px;
+    top: 12px;
+    right: 108px;
+    z-index: 20000;
+    padding: 6px 12px;
+    border: 1px solid color-mix(in srgb, var(--SmartThemeQuoteColor, #9bb6ff) 70%, #fff);
+    border-radius: 999px;
+    background: var(--SmartThemeBlurTintColor, #243056);
+    color: var(--SmartThemeBodyColor, #fff);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28);
+    cursor: grab;
+    font: inherit;
+    font-size: 13px;
+    touch-action: none;
+    user-select: none;
 }
 
-.tad-panel {
-    width: 240px;
-    padding: 10px;
-    border-radius: 10px;
-    background: rgba(20, 20, 20, 0.92);
-    color: #eee;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
+#tad-fab:hover {
+    filter: brightness(1.08);
 }
 
-.tad-panel label {
+#tad-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 20001;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px 10px;
+    background: rgba(0, 0, 0, 0.4);
+    backdrop-filter: blur(3px);
+}
+
+#tad-overlay[hidden] {
+    display: none;
+}
+
+#tad-sheet {
+    width: min(420px, 100%);
+    max-height: min(85vh, 640px);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    border: 1px solid color-mix(in srgb, var(--SmartThemeQuoteColor, #9bb6ff) 55%, transparent);
+    border-radius: 16px;
+    background: var(--SmartThemeBlurTintColor, #1a1a1a);
+    color: var(--SmartThemeBodyColor, #eee);
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.45);
+}
+
+.tad-sheet-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 16px;
+    border-bottom: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+}
+
+.tad-sheet-header h3 {
+    margin: 0;
+    font-size: 16px;
+}
+
+.tad-close {
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font-size: 22px;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.tad-sheet-body,
+.tad-fields {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.tad-sheet-body {
+    padding: 16px;
+    overflow: auto;
+}
+
+#tad-settings .tad-fields {
+    margin-top: 8px;
+}
+
+.tad-field {
     display: flex;
     flex-direction: column;
     gap: 4px;
 }
 
-.tad-panel input[type="text"],
-.tad-panel input[type="file"] {
+.tad-field input,
+.tad-check {
     width: 100%;
     box-sizing: border-box;
+}
+
+.tad-check {
+    border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+    border-radius: 8px;
+    background: color-mix(in srgb, currentColor 8%, transparent);
+    color: inherit;
+    padding: 6px 10px;
+    cursor: pointer;
+    font: inherit;
+}
+
+.tad-switches {
+    display: flex;
+    flex-direction: column;
+    border: 1px solid color-mix(in srgb, currentColor 14%, transparent);
+    border-radius: 12px;
+    overflow: hidden;
+}
+
+.tad-switch {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 10px;
+}
+
+.tad-switch + .tad-switch {
+    border-top: 1px dashed color-mix(in srgb, currentColor 16%, transparent);
+}
+
+.tad-hint {
+    opacity: 0.75;
+    font-size: 12px;
 }
 
 .tad-status-ok {

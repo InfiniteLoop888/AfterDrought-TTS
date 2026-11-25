@@ -5,6 +5,7 @@ const STORAGE = {
     auto: 'tad_auto',
     enabled: 'tad_enabled',
     inject: 'tad_inject',
+    fab: 'tad_fab',
 };
 
 const PROMPT_KEY = 'tts-afterdrought-dialogue';
@@ -407,117 +408,289 @@ function scheduleScan() {
     scanTimer = setTimeout(() => scan(), 300);
 }
 
-function buildDock() {
-    if (document.querySelector('.tad-dock')) return;
-    const dock = document.createElement('div');
-    dock.className = 'tad-dock';
+function voiceHintText() {
+    return voiceName || '未选文件时用服务自带 voice_03.wav';
+}
 
-    const toggle = document.createElement('button');
-    toggle.type = 'button';
-    toggle.className = 'tad-btn';
-    toggle.textContent = 'TTS';
+function paintControls() {
+    document.querySelectorAll('[data-tad="api"]').forEach((node) => {
+        if (document.activeElement !== node) node.value = apiBase();
+    });
+    document.querySelectorAll('[data-tad="enabled"]').forEach((node) => {
+        node.checked = enabled();
+    });
+    document.querySelectorAll('[data-tad="auto"]').forEach((node) => {
+        node.checked = autoPlay();
+    });
+    document.querySelectorAll('[data-tad="inject"]').forEach((node) => {
+        node.checked = injectEnabled();
+    });
+    document.querySelectorAll('[data-tad="voice-hint"]').forEach((node) => {
+        node.textContent = voiceHintText();
+    });
+}
 
-    const panel = document.createElement('div');
-    panel.className = 'tad-panel';
-    panel.hidden = true;
+function commitSettings(patch) {
+    const previous = apiBase();
+    if (patch.api !== undefined) localStorage.setItem(STORAGE.api, patch.api.trim() || DEFAULT_API);
+    if (patch.enabled !== undefined) localStorage.setItem(STORAGE.enabled, patch.enabled ? '1' : '0');
+    if (patch.auto !== undefined) localStorage.setItem(STORAGE.auto, patch.auto ? '1' : '0');
+    if (patch.inject !== undefined) localStorage.setItem(STORAGE.inject, patch.inject ? '1' : '0');
+    applyDialoguePrompt();
+    if (apiBase() !== previous && voiceName === 'voice_03.wav') {
+        voiceBlob = null;
+        voiceName = '';
+    }
+    if (patch.enabled === false) {
+        stopPlayback();
+        document.querySelectorAll('.tad-bar').forEach((node) => node.remove());
+    } else if (patch.enabled === true) {
+        scan();
+    }
+    paintControls();
+    if (patch.api !== undefined || patch.enabled !== undefined) refreshStatus();
+}
 
+async function refreshStatus() {
+    const nodes = [...document.querySelectorAll('[data-tad="status"]')];
+    nodes.forEach((node) => {
+        node.className = 'tad-status';
+        node.textContent = '检查中…';
+    });
+    document.querySelectorAll('[data-tad="voice-hint"]').forEach((node) => {
+        node.textContent = voiceHintText();
+    });
+    let text = 'IndexTTS 未就绪';
+    let ok = false;
+    try {
+        const response = await fetch(`${apiBase()}/api/v1/health`);
+        if (!response.ok) throw new Error(String(response.status));
+        text = 'IndexTTS 在线';
+        ok = true;
+    } catch { /* 面板上显示未就绪 */ }
+    nodes.forEach((node) => {
+        node.textContent = text;
+        node.className = ok ? 'tad-status tad-status-ok' : 'tad-status tad-status-down';
+    });
+}
+
+function appendSettingsFields(parent) {
     const status = document.createElement('div');
+    status.className = 'tad-status';
+    status.dataset.tad = 'status';
     status.textContent = '未检查';
 
     const apiLabel = document.createElement('label');
-    apiLabel.textContent = 'IndexTTS 地址';
+    apiLabel.className = 'tad-field';
+    apiLabel.append(document.createTextNode('IndexTTS 地址'));
     const apiInput = document.createElement('input');
     apiInput.type = 'text';
+    apiInput.className = 'text_pole';
+    apiInput.dataset.tad = 'api';
     apiInput.value = apiBase();
     apiLabel.append(apiInput);
 
+    const check = document.createElement('button');
+    check.type = 'button';
+    check.className = 'tad-check';
+    check.textContent = '检查连接';
+
     const voiceLabel = document.createElement('label');
-    voiceLabel.textContent = '音色参考';
+    voiceLabel.className = 'tad-field';
+    voiceLabel.append(document.createTextNode('音色参考'));
     const voiceInput = document.createElement('input');
     voiceInput.type = 'file';
     voiceInput.accept = 'audio/*,.wav,.mp3,.flac,.ogg,.opus';
+    voiceInput.dataset.tad = 'voice';
     voiceLabel.append(voiceInput);
     const voiceHint = document.createElement('div');
-    voiceHint.textContent = voiceName || '未选文件时用服务自带 voice_03.wav';
+    voiceHint.className = 'tad-hint';
+    voiceHint.dataset.tad = 'voice-hint';
+    voiceHint.textContent = voiceHintText();
 
-    const enabledLabel = document.createElement('label');
-    const enabledInput = document.createElement('input');
-    enabledInput.type = 'checkbox';
-    enabledInput.checked = enabled();
-    enabledLabel.append(enabledInput, document.createTextNode(' 启用'));
-
-    const autoLabel = document.createElement('label');
-    const autoInput = document.createElement('input');
-    autoInput.type = 'checkbox';
-    autoInput.checked = autoPlay();
-    autoLabel.append(autoInput, document.createTextNode(' 新回复自动朗读'));
-
-    const injectLabel = document.createElement('label');
-    const injectInput = document.createElement('input');
-    injectInput.type = 'checkbox';
-    injectInput.checked = injectEnabled();
-    injectLabel.append(injectInput, document.createTextNode(' 注入对白格式'));
-
-    async function refreshStatus() {
-        status.className = '';
-        status.textContent = '检查中…';
-        voiceHint.textContent = voiceName || '未选文件时用服务自带 voice_03.wav';
-        try {
-            const response = await fetch(`${apiBase()}/api/v1/health`);
-            if (!response.ok) throw new Error(String(response.status));
-            status.textContent = 'IndexTTS 在线';
-            status.className = 'tad-status-ok';
-        } catch {
-            status.textContent = 'IndexTTS 未就绪';
-            status.className = 'tad-status-down';
-        }
+    const switches = document.createElement('div');
+    switches.className = 'tad-switches';
+    for (const [key, label] of [
+        ['enabled', '启用'],
+        ['auto', '新回复自动朗读'],
+        ['inject', '注入对白格式'],
+    ]) {
+        const row = document.createElement('label');
+        row.className = 'tad-switch';
+        const text = document.createElement('span');
+        text.textContent = label;
+        const input = document.createElement('input');
+        input.type = 'checkbox';
+        input.dataset.tad = key;
+        row.append(text, input);
+        switches.append(row);
     }
 
-    function save() {
-        const previous = apiBase();
-        localStorage.setItem(STORAGE.api, apiInput.value.trim() || DEFAULT_API);
-        localStorage.setItem(STORAGE.enabled, enabledInput.checked ? '1' : '0');
-        localStorage.setItem(STORAGE.auto, autoInput.checked ? '1' : '0');
-        localStorage.setItem(STORAGE.inject, injectInput.checked ? '1' : '0');
-        applyDialoguePrompt();
-        if (apiBase() !== previous && voiceName === 'voice_03.wav') {
-            voiceBlob = null;
-            voiceName = '';
-        }
-        if (!enabledInput.checked) {
-            stopPlayback();
-            document.querySelectorAll('.tad-bar').forEach((node) => node.remove());
-        } else {
-            scan();
-        }
-        refreshStatus();
-    }
-
-    apiInput.addEventListener('change', save);
-    enabledInput.addEventListener('change', save);
-    autoInput.addEventListener('change', save);
-    injectInput.addEventListener('change', save);
+    apiInput.addEventListener('change', () => commitSettings({ api: apiInput.value }));
+    check.addEventListener('click', () => refreshStatus());
     voiceInput.addEventListener('change', () => {
         const file = voiceInput.files && voiceInput.files[0];
         if (!file) return;
-        rememberVoice(file, file.name).then(() => {
-            voiceHint.textContent = file.name;
-        });
+        rememberVoice(file, file.name).then(() => paintControls());
     });
-    toggle.addEventListener('click', () => {
-        panel.hidden = !panel.hidden;
-        if (!panel.hidden) refreshStatus();
+    switches.addEventListener('change', (event) => {
+        const input = event.target;
+        if (!(input instanceof HTMLInputElement) || input.type !== 'checkbox') return;
+        commitSettings({ [input.dataset.tad]: input.checked });
     });
 
-    panel.append(status, apiLabel, voiceLabel, voiceHint, enabledLabel, autoLabel, injectLabel);
-    dock.append(panel, toggle);
-    document.body.append(dock);
+    parent.append(status, apiLabel, check, voiceLabel, voiceHint, switches);
+}
+
+function openSheet() {
+    const overlay = document.querySelector('#tad-overlay');
+    if (!overlay) return;
+    overlay.hidden = false;
+    refreshStatus();
+}
+
+function closeSheet() {
+    const overlay = document.querySelector('#tad-overlay');
+    if (overlay) overlay.hidden = true;
+}
+
+function bindFab(fab) {
+    let startX = 0;
+    let startY = 0;
+    let originLeft = 0;
+    let originTop = 0;
+    let moved = false;
+
+    const saved = localStorage.getItem(STORAGE.fab);
+    if (saved) {
+        try {
+            const pos = JSON.parse(saved);
+            fab.style.left = `${pos.left}px`;
+            fab.style.top = `${pos.top}px`;
+            fab.style.right = 'auto';
+        } catch { /* 坏掉的位置记录就用默认右上角 */ }
+    }
+
+    fab.addEventListener('pointerdown', (event) => {
+        if (event.button !== 0) return;
+        const rect = fab.getBoundingClientRect();
+        startX = event.clientX;
+        startY = event.clientY;
+        originLeft = rect.left;
+        originTop = rect.top;
+        moved = false;
+        fab.setPointerCapture(event.pointerId);
+    });
+    fab.addEventListener('pointermove', (event) => {
+        if (!fab.hasPointerCapture(event.pointerId)) return;
+        const dx = event.clientX - startX;
+        const dy = event.clientY - startY;
+        if (!moved && Math.hypot(dx, dy) < 6) return;
+        moved = true;
+        const left = Math.max(8, Math.min(window.innerWidth - fab.offsetWidth - 8, originLeft + dx));
+        const top = Math.max(8, Math.min(window.innerHeight - fab.offsetHeight - 8, originTop + dy));
+        fab.style.left = `${left}px`;
+        fab.style.top = `${top}px`;
+        fab.style.right = 'auto';
+    });
+    fab.addEventListener('pointerup', (event) => {
+        if (!fab.hasPointerCapture(event.pointerId)) return;
+        fab.releasePointerCapture(event.pointerId);
+        if (moved) {
+            localStorage.setItem(STORAGE.fab, JSON.stringify({
+                left: Number.parseFloat(fab.style.left),
+                top: Number.parseFloat(fab.style.top),
+            }));
+            return;
+        }
+        openSheet();
+    });
+}
+
+function buildShell() {
+    if (document.querySelector('#tad-fab')) return;
+
+    const fab = document.createElement('button');
+    fab.id = 'tad-fab';
+    fab.type = 'button';
+    fab.textContent = 'TTS';
+    fab.title = '语音设置';
+    bindFab(fab);
+
+    const overlay = document.createElement('div');
+    overlay.id = 'tad-overlay';
+    overlay.hidden = true;
+
+    const sheet = document.createElement('div');
+    sheet.id = 'tad-sheet';
+    sheet.addEventListener('click', (event) => event.stopPropagation());
+
+    const header = document.createElement('div');
+    header.className = 'tad-sheet-header';
+    const title = document.createElement('h3');
+    title.textContent = '语音设置';
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'tad-close';
+    close.textContent = '×';
+    close.title = '关闭';
+    close.addEventListener('click', closeSheet);
+    header.append(title, close);
+
+    const body = document.createElement('div');
+    body.className = 'tad-sheet-body';
+    appendSettingsFields(body);
+    sheet.append(header, body);
+    overlay.append(sheet);
+    overlay.addEventListener('click', closeSheet);
+    document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') closeSheet();
+    });
+
+    document.body.append(fab, overlay);
+    refreshStatus();
+}
+
+function mountExtensionSettings() {
+    if (document.querySelector('#tad-settings')) return;
+    const host = document.querySelector('#extensions_settings');
+    if (!host) return;
+
+    const drawer = document.createElement('div');
+    drawer.id = 'tad-settings';
+    drawer.className = 'inline-drawer';
+
+    const toggle = document.createElement('div');
+    toggle.className = 'inline-drawer-toggle inline-drawer-header';
+    const name = document.createElement('b');
+    name.textContent = 'TTS Afterdrought';
+    const icon = document.createElement('div');
+    icon.className = 'inline-drawer-icon fa-solid fa-circle-chevron-down down';
+    toggle.append(name, icon);
+
+    const content = document.createElement('div');
+    content.className = 'inline-drawer-content';
+    const note = document.createElement('div');
+    note.className = 'tad-hint';
+    note.textContent = '和悬浮按钮打开的是同一组设置。';
+    const fields = document.createElement('div');
+    fields.className = 'tad-fields';
+    appendSettingsFields(fields);
+    content.append(note, fields);
+
+    drawer.append(toggle, content);
+    host.append(drawer);
+    paintControls();
     refreshStatus();
 }
 
 function init() {
     applyDialoguePrompt();
-    buildDock();
+    buildShell();
+    mountExtensionSettings();
+    if (event_types.APP_READY) {
+        eventSource.on(event_types.APP_READY, mountExtensionSettings);
+    }
     const chat = document.querySelector('#chat');
     if (chat) {
         const observer = new MutationObserver(scheduleScan);
