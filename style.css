@@ -80,16 +80,62 @@
     opacity: 0.7;
 }
 
-.voice-bubble.playing .sovits-voice-bar {
+.voice-bubble.playing .sovits-voice-bar,
+.tad-line.playing .sovits-voice-bar {
     animation: tad-wave 1s infinite ease-in-out;
 }
 
-.voice-bubble.playing .sovits-voice-bar:nth-child(2) {
+.voice-bubble.playing .sovits-voice-bar:nth-child(2),
+.tad-line.playing .sovits-voice-bar:nth-child(2) {
     animation-delay: 0.15s;
 }
 
-.voice-bubble.playing .sovits-voice-bar:nth-child(3) {
+.voice-bubble.playing .sovits-voice-bar:nth-child(3),
+.tad-line.playing .sovits-voice-bar:nth-child(3) {
     animation-delay: 0.3s;
+}
+
+.tad-line {
+    display: inline;
+    border-radius: 3px;
+    padding: 0 2px;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+
+.tad-line-name {
+    color: var(--SmartThemeQuoteColor, #e18a24);
+    font-weight: 600;
+}
+
+.tad-line-mark {
+    display: inline-flex;
+    align-items: center;
+    margin-left: 0.35em;
+    vertical-align: middle;
+    opacity: 0.45;
+}
+
+.tad-line-mark .sovits-voice-waves {
+    height: 0.85em;
+}
+
+.tad-line:hover,
+.tad-line.playing {
+    background: color-mix(in srgb, var(--SmartThemeQuoteColor, #e18a24) 28%, transparent);
+}
+
+.tad-line.playing .tad-line-mark,
+.tad-line[data-status="ready"] .tad-line-mark {
+    opacity: 0.9;
+}
+
+.tad-line.loading .tad-line-mark {
+    animation: tad-pulse 1.5s infinite;
+}
+
+.tad-line.error {
+    box-shadow: inset 0 -1px 0 #d4544a;
 }
 
 .sovits-voice-duration {
@@ -205,6 +251,7 @@
 }
 
 .tad-field input,
+.tad-field select,
 .tad-check {
     width: 100%;
     box-sizing: border-box;
@@ -251,4 +298,54 @@
 
 .tad-status-down {
     color: #e6b35a;
+}
+
+.tad-module {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+}
+
+.tad-module-title {
+    font-size: 13px;
+    font-weight: 650;
+}
+
+.tad-prompt {
+    min-height: 140px;
+    resize: vertical;
+    font: inherit;
+}
+
+.tad-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+}
+
+.tad-regex {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px;
+    border: 1px solid color-mix(in srgb, currentColor 14%, transparent);
+    border-radius: 10px;
+}
+
+.tad-regex-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.tad-mini {
+    border: 0;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    font: inherit;
 }
