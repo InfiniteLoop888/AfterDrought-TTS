@@ -390,12 +390,20 @@ function visibleText(value) {
     return String(value || '').replace(/<[^>]+>|&lt;[^&]+&gt;|&nbsp;/gi, ' ').replace(/\s+/g, ' ').trim();
 }
 
+function directorJson(fragment) {
+    return String(fragment || '')
+        .replace(/<q\b[^>]*>|<\/q>|<br\s*\/?>/gi, '')
+        .replace(/<[^>]+>/g, '')
+        .replace(/&quot;|&#0*34;/gi, '"')
+        .replace(/&amp;/gi, '&');
+}
+
 function takeDirector(spoken) {
     const match = String(spoken || '').match(/〖vd:([\s\S]*?)〗/);
     if (!match) return { text: String(spoken || '').trim(), director: null };
     let director = null;
     try {
-        const data = JSON.parse(match[1]);
+        const data = JSON.parse(directorJson(match[1]));
         if (data && typeof data === 'object' && !Array.isArray(data)) director = data;
     } catch { /* 导演指令不是合法 JSON 时丢掉，对白照常朗读 */ }
     return { text: String(spoken).replace(match[0], ' ').replace(/\s+/g, ' ').trim(), director };
@@ -698,7 +706,14 @@ function renderDialogueHtml(html) {
             result += source.slice(lastIndex, bareMatch.index);
             lastIndex = segment.end;
             searchFrom = segment.end;
-            result += buildVoiceHtml(speaker, segmentEmotion(segment.director), segment.text, segment.settled, segment.director);
+            if (lineMode) {
+                result += buildVoiceHtml(speaker, segmentEmotion(segment.director), segment.text, segment.settled, segment.director);
+            } else {
+                result += escapeHtmlAttr(presentDialogue(segment.text));
+                if (!gatewayCharacters.length || speakerKnown(speaker)) {
+                    result += ' ' + buildBubbleHtml(speaker, segmentEmotion(segment.director), segment.text, segment.settled, segment.director);
+                }
+            }
             continue;
         }
 
@@ -730,9 +745,18 @@ function renderDialogueHtml(html) {
         }
         matched = true;
         result += source.slice(lastIndex, emotionMatch.index);
-        lastIndex = lineMode ? spoken.end : tagEnd;
-        searchFrom = lastIndex;
-        result += buildVoiceHtml(speaker, emotion || 'default', display, spoken.settled, directed.director);
+        if (lineMode) {
+            lastIndex = spoken.end;
+            searchFrom = lastIndex;
+            result += buildVoiceHtml(speaker, emotion || 'default', display, spoken.settled, directed.director);
+        } else {
+            result += source.slice(tagEnd, spoken.end).replace(/〖vd:[\s\S]*?〗/g, '');
+            if (!gatewayCharacters.length || speakerKnown(speaker)) {
+                result += ' ' + buildBubbleHtml(speaker, emotion || 'default', display, spoken.settled, directed.director);
+            }
+            lastIndex = spoken.end;
+            searchFrom = lastIndex;
+        }
     }
     const tagged = matched ? result + source.slice(lastIndex) : source;
     return tagged.replace(/(\s*)\[TTSVoice[:：]\s*([^:：]+)\s*[:：]\s*([^:：]*)\s*[:：]\s*(.*?)\]/gi, (full, space, name, emotion, text) => {

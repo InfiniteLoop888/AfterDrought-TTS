@@ -112,11 +112,10 @@
 }
 
 .tad-line-mark {
-    display: inline-flex;
+    display: none;
     align-items: center;
     margin-left: 0.35em;
     vertical-align: middle;
-    opacity: 0.45;
 }
 
 .tad-line-mark .sovits-voice-waves {
@@ -129,12 +128,13 @@
 }
 
 .tad-line.playing .tad-line-mark,
-.tad-line[data-status="ready"] .tad-line-mark {
-    opacity: 0.9;
+.tad-line[data-status="ready"] .tad-line-mark,
+.tad-line[data-status="generating"] .tad-line-mark {
+    display: inline-flex;
 }
 
-.tad-line.loading .tad-line-mark {
-    animation: tad-pulse 1.5s infinite;
+.tad-line[data-status="generating"] .tad-line-mark {
+    animation: tad-blink 0.8s ease-in-out infinite;
 }
 
 .tad-line.error {
@@ -152,10 +152,10 @@
     50% { height: 12px; opacity: 1; }
 }
 
-@keyframes tad-pulse {
+@keyframes tad-blink {
     0%,
-    100% { opacity: 0.65; }
-    50% { opacity: 1; }
+    100% { opacity: 1; }
+    50% { opacity: 0.15; }
 }
 
 #tad-fab {
