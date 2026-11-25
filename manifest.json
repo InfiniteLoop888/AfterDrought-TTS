@@ -1,9 +1,9 @@
 {
     "name": "tts-afterdrought",
     "display_name": "TTS Afterdrought",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "author": "local",
-    "description": "把酒馆对白直接发给本机 TTS 服务并播放。",
+    "description": "把酒馆对白发给语音网关并播放。音色和情绪预设在网关的角色配置里。",
     "loading_location": "before_body",
     "js": "index.js",
     "css": "style.css"

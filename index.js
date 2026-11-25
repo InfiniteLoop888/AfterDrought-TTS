@@ -9,180 +9,10 @@ const STORAGE = {
 };
 
 const PROMPT_KEY = 'tts-afterdrought-dialogue';
-const DEFAULT_API = 'http://127.0.0.1:7860';
-const SPEECH_SAMPLING = {
-    do_sample: 'true',
-    temperature: '0.7',
-    num_beams: '1',
-    repetition_penalty: '10',
-};
-
-
-const VECTORS = {
-    // ==========================================
-    // 基础情绪
-    // [开心, 愤怒, 悲伤, 恐惧, 厌恶, 低落, 惊讶, 平静]
-    // ==========================================
-
-    '平静': [0, 0, 0, 0, 0, 0, 0, 0.18],
-    '日常': [0.02, 0, 0, 0, 0, 0, 0, 0.22],
-    '自然': [0.04, 0, 0, 0, 0, 0, 0, 0.25],
-    '温柔': [0.12, 0, 0, 0, 0, 0, 0, 0.30],
-    '轻松': [0.22, 0, 0, 0, 0, 0, 0, 0.18],
-    '开心': [0.55, 0, 0, 0, 0, 0, 0, 0.08],
-    '高兴': [0.65, 0, 0, 0, 0, 0, 0, 0.05],
-    '喜悦': [0.78, 0, 0, 0, 0, 0, 0, 0],
-    '兴奋': [0.85, 0, 0, 0, 0, 0, 0.12, 0],
-    '狂喜': [1.0, 0, 0, 0, 0, 0, 0.15, 0],
-
-    // ==========================================
-    // 愤怒与不满
-    // ==========================================
-
-    '不满': [0, 0.18, 0, 0, 0.05, 0, 0, 0.12],
-    '不悦': [0, 0.25, 0, 0, 0.08, 0, 0, 0.08],
-    '恼火': [0, 0.45, 0, 0, 0.08, 0, 0, 0],
-    '生气': [0, 0.60, 0, 0, 0.05, 0, 0, 0],
-    '愤怒': [0, 0.82, 0, 0, 0.08, 0, 0, 0],
-    '暴怒': [0, 1.0, 0, 0, 0.15, 0, 0, 0],
-    '恼羞成怒': [0.12, 0.65, 0, 0, 0, 0, 0.05, 0],
-    '气愤': [0, 0.75, 0.05, 0, 0.12, 0, 0, 0],
-    '委屈地生气': [0, 0.35, 0.38, 0, 0, 0.12, 0, 0],
-    '压抑怒火': [0, 0.48, 0.05, 0, 0.05, 0, 0, 0.20],
-    '冷淡不满': [0, 0.25, 0, 0, 0.12, 0.05, 0, 0.25],
-
-    // ==========================================
-    // 悲伤与低落
-    // ==========================================
-
-    '失落': [0, 0, 0.30, 0, 0, 0.25, 0, 0.05],
-    '难过': [0, 0, 0.55, 0, 0, 0.15, 0, 0],
-    '悲伤': [0, 0, 0.72, 0, 0, 0.20, 0, 0],
-    '伤心': [0, 0, 0.80, 0, 0, 0.15, 0, 0],
-    '低落': [0, 0, 0.15, 0, 0, 0.40, 0, 0.08],
-    '沮丧': [0, 0.08, 0.30, 0, 0, 0.45, 0, 0],
-    '绝望': [0, 0, 0.85, 0.08, 0, 0.55, 0, 0],
-    '心碎': [0, 0, 0.90, 0, 0, 0.60, 0, 0],
-    '悲伤地微笑': [0.18, 0, 0.42, 0, 0, 0.12, 0, 0.05],
-    '强忍悲伤': [0, 0, 0.48, 0, 0, 0.25, 0, 0.28],
-    '哽咽': [0, 0, 0.72, 0.08, 0, 0.18, 0, 0],
-    '哭泣': [0, 0, 0.85, 0.10, 0, 0.30, 0, 0],
-    '痛哭': [0, 0, 1.0, 0.18, 0, 0.35, 0, 0],
-
-    // ==========================================
-    // 恐惧与紧张
-    // ==========================================
-
-    '紧张': [0, 0, 0, 0.28, 0, 0.05, 0, 0.12],
-    '不安': [0, 0, 0.08, 0.35, 0, 0.12, 0, 0.08],
-    '担忧': [0, 0, 0.18, 0.38, 0, 0.12, 0, 0.05],
-    '害怕': [0, 0, 0, 0.60, 0, 0.05, 0, 0],
-    '恐惧': [0, 0, 0, 0.82, 0, 0, 0.05, 0],
-    '惊恐': [0, 0, 0, 0.95, 0, 0, 0.35, 0],
-    '慌张': [0.05, 0, 0, 0.60, 0, 0, 0.25, 0],
-    '焦虑': [0, 0.08, 0.12, 0.55, 0, 0.18, 0, 0],
-    '忐忑': [0.08, 0, 0.05, 0.38, 0, 0.05, 0.08, 0.05],
-    '如释重负': [0.38, 0, 0, 0, 0, 0.05, 0, 0.15],
-
-    // ==========================================
-    // 厌恶与嫌弃
-    // ==========================================
-
-    '嫌弃': [0, 0.08, 0, 0, 0.40, 0, 0, 0.08],
-    '厌恶': [0, 0.05, 0, 0, 0.70, 0, 0, 0],
-    '反感': [0, 0.22, 0, 0, 0.52, 0, 0, 0],
-    '鄙夷': [0, 0.18, 0, 0, 0.65, 0, 0, 0.08],
-    '嫌弃地吐槽': [0.05, 0.18, 0, 0, 0.45, 0, 0, 0.05],
-    '无奈': [0.05, 0.08, 0.12, 0, 0, 0.18, 0, 0.25],
-
-    // ==========================================
-    // 惊讶与困惑
-    // ==========================================
-
-    '惊讶': [0.08, 0, 0, 0, 0, 0, 0.55, 0],
-    '震惊': [0, 0, 0, 0.05, 0, 0, 0.90, 0],
-    '惊喜': [0.48, 0, 0, 0, 0, 0, 0.45, 0],
-    '意外': [0.12, 0, 0, 0, 0, 0, 0.45, 0.05],
-    '疑惑': [0, 0, 0, 0, 0, 0, 0.30, 0.12],
-    '困惑': [0, 0, 0.05, 0, 0, 0.08, 0.25, 0.12],
-    '难以置信': [0, 0, 0, 0, 0, 0, 0.70, 0],
-    '恍然大悟': [0.30, 0, 0, 0, 0, 0, 0.35, 0.08],
-
-    // ==========================================
-    // 害羞与亲密
-    // ==========================================
-
-    '害羞': [0.18, 0, 0.03, 0.12, 0, 0, 0.05, 0.12],
-    '羞涩': [0.22, 0, 0, 0.08, 0, 0, 0, 0.18],
-    '脸红': [0.28, 0, 0, 0.05, 0, 0, 0.03, 0.08],
-    '不好意思': [0.18, 0, 0, 0.08, 0, 0, 0, 0.18],
-    '羞恼': [0.15, 0.35, 0, 0, 0, 0, 0.08, 0],
-    '撒娇': [0.48, 0, 0, 0, 0, 0, 0, 0.08],
-    '依恋': [0.35, 0, 0.05, 0, 0, 0, 0, 0.25],
-    '宠溺': [0.40, 0, 0, 0, 0, 0, 0, 0.28],
-    '暧昧': [0.28, 0, 0, 0, 0, 0, 0, 0.12],
-    '温存': [0.32, 0, 0, 0, 0, 0, 0, 0.32],
-    '深情': [0.42, 0, 0.08, 0, 0, 0, 0, 0.18],
-    '吃醋': [0.05, 0.32, 0.15, 0, 0.05, 0.08, 0, 0.05],
-    '占有欲': [0.12, 0.38, 0.05, 0, 0, 0, 0, 0.05],
-    '委屈撒娇': [0.18, 0.12, 0.35, 0, 0, 0.08, 0, 0.05],
-    '期待': [0.35, 0, 0, 0.08, 0, 0, 0.18, 0.05],
-    '眷恋': [0.25, 0, 0.18, 0, 0, 0.05, 0, 0.22],
-
-    // ==========================================
-    // 特殊语气与复杂情绪
-    // ==========================================
-
-    '调皮': [0.48, 0.05, 0, 0, 0, 0, 0.12, 0],
-    '俏皮': [0.42, 0, 0, 0, 0, 0, 0.08, 0.08],
-    '得意': [0.55, 0, 0, 0, 0, 0, 0.05, 0.05],
-    '自信': [0.32, 0, 0, 0, 0, 0, 0, 0.28],
-    '傲娇': [0.18, 0.28, 0, 0, 0, 0, 0.05, 0.05],
-    '温柔地责备': [0.08, 0.22, 0, 0, 0, 0, 0, 0.28],
-    '无可奈何': [0.02, 0.08, 0.12, 0, 0, 0.18, 0, 0.28],
-    '苦笑': [0.08, 0.05, 0.35, 0, 0, 0.12, 0, 0.08],
-    '自嘲': [0.12, 0, 0.25, 0, 0, 0.18, 0, 0.08],
-    '认真': [0, 0, 0, 0, 0, 0, 0, 0.42],
-    '严肃': [0, 0.08, 0, 0, 0, 0, 0, 0.48],
-    '坚定': [0.08, 0.15, 0, 0, 0, 0, 0, 0.28],
-    '疲惫': [0, 0, 0.12, 0, 0, 0.42, 0, 0.12],
-    '困倦': [0.02, 0, 0.05, 0, 0, 0.35, 0, 0.20],
-    '慵懒': [0.12, 0, 0, 0, 0, 0.18, 0, 0.25],
-    '敷衍': [0, 0.08, 0, 0, 0.12, 0.12, 0, 0.18],
-    '冷淡': [0, 0.05, 0.05, 0, 0.08, 0.15, 0, 0.32],
-    '尴尬': [0.05, 0, 0.08, 0.12, 0, 0, 0.12, 0.08],
-    '释然': [0.25, 0, 0.05, 0, 0, 0, 0, 0.25],
-    '感动': [0.30, 0, 0.38, 0, 0, 0.08, 0.08, 0.05],
-    '欣慰': [0.40, 0, 0, 0, 0, 0, 0, 0.30],
-    '幸福': [0.65, 0, 0, 0, 0, 0, 0, 0.15],
-    '温暖': [0.38, 0, 0, 0, 0, 0, 0, 0.35],
-
-    // ==========================================
-    // English aliases
-    // ==========================================
-
-    happy: [0.60, 0, 0, 0, 0, 0, 0, 0],
-    excited: [0.85, 0, 0, 0, 0, 0, 0.12, 0],
-    joyful: [0.78, 0, 0, 0, 0, 0, 0, 0],
-    angry: [0, 0.82, 0, 0, 0.08, 0, 0, 0],
-    annoyed: [0, 0.35, 0, 0, 0.12, 0, 0, 0.08],
-    sad: [0, 0, 0.65, 0, 0, 0.20, 0, 0],
-    crying: [0, 0, 0.85, 0.10, 0, 0.30, 0, 0],
-    afraid: [0, 0, 0, 0.65, 0, 0, 0, 0],
-    nervous: [0, 0, 0, 0.30, 0, 0.05, 0, 0.15],
-    disgusted: [0, 0.05, 0, 0, 0.70, 0, 0, 0],
-    surprised: [0.08, 0, 0, 0, 0, 0, 0.55, 0],
-    calm: [0, 0, 0, 0, 0, 0, 0, 0.18],
-    gentle: [0.12, 0, 0, 0, 0, 0, 0, 0.30],
-    shy: [0.18, 0, 0.03, 0.12, 0, 0, 0.05, 0.12],
-    embarrassed: [0.15, 0, 0.05, 0.12, 0, 0, 0.08, 0.10],
-    playful: [0.48, 0.05, 0, 0, 0, 0, 0.12, 0],
-    affectionate: [0.40, 0, 0, 0, 0, 0, 0, 0.28],
-    sarcastic: [0.05, 0.20, 0, 0, 0.12, 0, 0, 0.12],
-    tired: [0, 0, 0.12, 0, 0, 0.42, 0, 0.12],
-    confident: [0.32, 0, 0, 0, 0, 0, 0, 0.28]
-};
-
+const LEGACY_API = 'http://127.0.0.1:7860';
+const DEFAULT_API = 'http://127.0.0.1:9881';
+const FALLBACK_EMOTIONS = ['平静', '温柔', '开心', '生气', '愤怒', '悲伤', '害怕', '惊讶', '害羞', '冷淡', '耳语'];
+let emotionNames = FALLBACK_EMOTIONS.slice();
 
 const BARS_HTML = '<span class="sovits-voice-waves"><span class="sovits-voice-bar"></span><span class="sovits-voice-bar"></span><span class="sovits-voice-bar"></span></span>';
 const BUBBLE_ROOTS = '.mes_text, .message-body, .markdown-content, #chat .mes_text, .mes .text';
@@ -198,14 +28,14 @@ let scanTimer = 0;
 let pumping = false;
 let playNewReply = false;
 let streaming = false;
-let voiceBlob = null;
-let voiceName = '';
 
 function apiBase() {
-    return (localStorage.getItem(STORAGE.api) || DEFAULT_API)
-        .trim()
+    let stored = (localStorage.getItem(STORAGE.api) || '').trim();
+    if (!stored || stored.replace(/\/+$/, '') === LEGACY_API) stored = DEFAULT_API;
+    return stored
         .replace(/\/+$/, '')
         .replace(/\/api\/v1$/, '')
+        .replace(/\/v1$/, '')
         .replace(/\/tts$/, '');
 }
 
@@ -237,7 +67,19 @@ function currentCharacterName() {
 let speakableGeneration = true;
 
 function promptEmotionNames() {
-    return Object.keys(VECTORS).filter((name) => /[\u4e00-\u9fff]/.test(name));
+    return emotionNames;
+}
+
+async function loadEmotionNames() {
+    try {
+        const response = await fetch(`${apiBase()}/v1/emotions`);
+        if (!response.ok) return;
+        const data = await response.json();
+        if (Array.isArray(data.names) && data.names.length) {
+            emotionNames = data.names;
+            applyDialoguePrompt();
+        }
+    } catch { /* 网关不在时继续用短列表 */ }
 }
 
 function dialoguePrompt() {
@@ -250,9 +92,10 @@ ${who}角色真正说出口的每一句都要打上语音标记，否则无法�
 [角色名, 情绪] 对白内容
 
 规则：
-1. 同一个人全篇只用同一个角色名。
+1. 同一个人全篇只用同一个角色名。这个名字要和语音网关里的角色 id 或显示名一致。
 2. 情绪只能从这些词里选一个：default、${promptEmotionNames().join('、')}。听不出明显情绪时用 default。
 3. 标记后面同一行只写这一句口头对白。旁白另起一行，写在标记外面。
+4. 语气不是情绪。需要耳语、放慢或冷淡时，在同一行末尾追加 〖vd:{"delivery":{"intensity":"whisper","pace":"slow"}}〗。intensity 只能是 normal、gentle、soft、whisper、firm、cold、teasing、hesitant、excited。写错会被忽略，对白照常朗读。
 
 示例：
 她把目光挪开。
@@ -296,20 +139,38 @@ function visibleText(value) {
     return String(value || '').replace(/<[^>]+>|&lt;[^&]+&gt;|&nbsp;/gi, ' ').replace(/\s+/g, ' ').trim();
 }
 
-function bubbleKey(speaker, emotion, text) {
-    return `${speaker}\n${emotion}\n${text}`;
+function takeDirector(spoken) {
+    const match = String(spoken || '').match(/〖vd:([\s\S]*?)〗/);
+    if (!match) return { text: String(spoken || '').trim(), director: null };
+    let director = null;
+    try {
+        const data = JSON.parse(match[1]);
+        if (data && typeof data === 'object' && !Array.isArray(data)) director = data;
+    } catch { /* 导演指令不是合法 JSON 时丢掉，对白照常朗读 */ }
+    return { text: String(spoken).replace(match[0], ' ').replace(/\s+/g, ' ').trim(), director };
 }
 
-function buildBubbleHtml(speaker, emotion, text, settled = true) {
-    const key = bubbleKey(speaker, emotion, text);
-    const cached = voiceName ? memory.get(`${voiceName}\n${emotion}\n${text}`) : '';
+function segmentText(director) {
+    if (!director || !Array.isArray(director.segments)) return '';
+    return director.segments.map((item) => (item && item.text) || '').join('').trim();
+}
+
+function bubbleKey(speaker, emotion, text, director = '') {
+    return `${speaker}\n${emotion}\n${text}\n${director}`;
+}
+
+function buildBubbleHtml(speaker, emotion, text, settled = true, director = null) {
+    const directorText = director ? JSON.stringify(director) : '';
+    const key = bubbleKey(speaker, emotion, text, directorText);
+    const cached = memory.get(key) || '';
     const status = cached ? 'ready' : (pending.has(key) ? 'queued' : 'waiting');
     const loading = status === 'queued' ? ' loading' : '';
     const width = Math.min(220, 60 + Math.max(2, Math.ceil(text.length * 0.25)) * 10);
     const seconds = Math.max(2, Math.ceil(text.length * 0.25));
     const url = cached ? ` data-audio-url="${escapeHtmlAttr(cached)}"` : '';
     const settledAttr = settled ? '' : ' data-settled="0"';
-    return `<span class="voice-bubble${loading}" style="width: ${width}px" data-status="${status}" data-key="${escapeHtmlAttr(key)}"${url} data-text="${escapeHtmlAttr(text)}" data-voice-name="${escapeHtmlAttr(speaker)}" data-voice-emotion="${escapeHtmlAttr(emotion)}"${settledAttr}>${BARS_HTML}<span class="sovits-voice-duration">${seconds}&quot;</span></span>`;
+    const directorAttr = directorText ? ` data-director="${escapeHtmlAttr(directorText)}"` : '';
+    return `<span class="voice-bubble${loading}" style="width: ${width}px" data-status="${status}" data-key="${escapeHtmlAttr(key)}"${url} data-text="${escapeHtmlAttr(text)}" data-voice-name="${escapeHtmlAttr(speaker)}" data-voice-emotion="${escapeHtmlAttr(emotion)}"${settledAttr}${directorAttr}>${BARS_HTML}<span class="sovits-voice-duration">${seconds}&quot;</span></span>`;
 }
 
 function lineEnded(rest) {
@@ -366,78 +227,19 @@ function parseTextToBubbles(html) {
         matched = true;
         result += source.slice(lastIndex, match.index);
         lastIndex = tagEnd;
-        result += buildBubbleHtml(speaker, emotion || 'default', spoken.spoken, spoken.settled);
+        const directed = takeDirector(spoken.spoken);
+        const display = directed.text || segmentText(directed.director);
+        if (!display) continue;
+        result += buildBubbleHtml(speaker, emotion || 'default', display, spoken.settled, directed.director);
     }
     const tagged = matched ? result + source.slice(lastIndex) : source;
     const withLegacy = tagged.replace(/(\s*)\[TTSVoice[:：]\s*([^:：]+)\s*[:：]\s*([^:：]*)\s*[:：]\s*(.*?)\]/gi, (full, space, name, emotion, text) => {
-        const spoken = visibleText(text);
-        if (!spoken) return full;
-        return `${space || ''}${buildBubbleHtml(name.trim(), emotion.trim() || 'default', spoken)}`;
+        const directed = takeDirector(visibleText(text));
+        const display = directed.text || segmentText(directed.director);
+        if (!display) return full;
+        return `${space || ''}${buildBubbleHtml(name.trim(), emotion.trim() || 'default', display, true, directed.director)}`;
     });
     return withLegacy === html ? html : withLegacy;
-}
-
-function emotionFields(emotion) {
-    const name = (emotion || 'default').trim();
-    const vector = VECTORS[name] || VECTORS[name.toLowerCase()];
-    if (!vector) return { emo_mode: '0', emo_weight: '0.65' };
-    const fields = { emo_mode: '2', emo_weight: '0.8' };
-    vector.forEach((value, index) => {
-        fields[`vec${index + 1}`] = String(value);
-    });
-    return fields;
-}
-
-function voiceDb() {
-    return new Promise((resolve, reject) => {
-        const request = indexedDB.open('tts-afterdrought', 1);
-        request.onupgradeneeded = () => request.result.createObjectStore('kv');
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error);
-    });
-}
-
-async function rememberVoice(blob, name) {
-    voiceBlob = blob;
-    voiceName = name || 'voice.wav';
-    memory.clear();
-    document.querySelectorAll('.voice-bubble').forEach((btn) => {
-        btn.dataset.status = 'waiting';
-        btn.removeAttribute('data-audio-url');
-        btn.classList.remove('loading', 'playing', 'error');
-    });
-    scheduleLast(false);
-    try {
-        const db = await voiceDb();
-        await new Promise((resolve, reject) => {
-            const tx = db.transaction('kv', 'readwrite');
-            tx.objectStore('kv').put({ blob: voiceBlob, name: voiceName }, 'voice');
-            tx.oncomplete = resolve;
-            tx.onerror = () => reject(tx.error);
-        });
-    } catch { /* 存不下时，这次页面里仍然用刚选的文件 */ }
-}
-
-async function referenceAudio() {
-    if (voiceBlob) return { blob: voiceBlob, name: voiceName || 'voice.wav' };
-    try {
-        const db = await voiceDb();
-        const saved = await new Promise((resolve, reject) => {
-            const request = db.transaction('kv', 'readonly').objectStore('kv').get('voice');
-            request.onsuccess = () => resolve(request.result);
-            request.onerror = () => reject(request.error);
-        });
-        if (saved && saved.blob) {
-            voiceBlob = saved.blob;
-            voiceName = saved.name || 'voice.wav';
-            return { blob: voiceBlob, name: voiceName };
-        }
-    } catch { /* 没有存过音色时用服务自带示例 */ }
-    const response = await fetch(`${apiBase()}/api/v1/examples/voice_03.wav`);
-    if (!response.ok) throw new Error('读不到参考音频');
-    voiceBlob = await response.blob();
-    voiceName = 'voice_03.wav';
-    return { blob: voiceBlob, name: voiceName };
 }
 
 function stopPlayback() {
@@ -452,66 +254,57 @@ function stopPlayback() {
     });
 }
 
-async function readSse(response) {
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = '';
-    let doneEvent = null;
-    while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        let idx;
-        while ((idx = buf.indexOf('\n\n')) >= 0) {
-            const block = buf.slice(0, idx);
-            buf = buf.slice(idx + 2);
-            const line = block.split('\n').find((item) => item.startsWith('data:'));
-            if (!line) continue;
-            let event;
-            try { event = JSON.parse(line.slice(5).trim()); } catch { continue; }
-            if (event.type === 'error') throw new Error(event.detail || '生成失败');
-            if (event.type === 'stopped') throw new Error(event.detail || '已停止生成');
-            if (event.type === 'done') doneEvent = event;
-        }
+function sessionId() {
+    try {
+        const context = globalThis.SillyTavern?.getContext?.() || {};
+        return String(context.chatId || context.chat_id || context.groupId || 'st-session');
+    } catch {
+        return 'st-session';
     }
-    if (!doneEvent || !doneEvent.wav) throw new Error('生成连接中断');
-    return doneEvent;
 }
 
 async function fetchAudio(segment) {
-    const voice = await referenceAudio();
-    const key = `${voice.name}\n${segment.emotion}\n${segment.text}`;
-    if (memory.has(key)) return memory.get(key);
-    const body = new FormData();
-    body.append('text', segment.text);
-    body.append('client_id', 'afterdrought-tts');
-    body.append('spk_audio', voice.blob, voice.name);
-    for (const [name, value] of Object.entries(emotionFields(segment.emotion))) {
-        body.append(name, value);
+    if (!segment.fresh && memory.has(segment.key)) return memory.get(segment.key);
+    const preset = segment.emotion && segment.emotion !== 'default' ? segment.emotion : null;
+    const body = {
+        request_id: segment.fresh ? `${segment.key}:${Date.now()}` : `${sessionId()}:${segment.key}`,
+        session_id: sessionId(),
+        character_id: segment.speaker,
+        emotion: { type: 'vector', preset, vector: null, weight: null },
+        output: { format: 'wav', sample_rate: 24000, fresh: !!segment.fresh },
+    };
+    if (segment.director && Array.isArray(segment.director.segments) && segment.director.segments.length) {
+        body.segments = segment.director.segments;
+    } else {
+        body.text = segment.text;
     }
-    for (const [name, value] of Object.entries(SPEECH_SAMPLING)) {
-        body.append(name, value);
+    if (segment.director && segment.director.delivery && typeof segment.director.delivery === 'object') {
+        body.delivery = segment.director.delivery;
+    }
+    if (segment.director && segment.director.emotion && typeof segment.director.emotion === 'object') {
+        body.emotion = segment.director.emotion;
     }
     let response;
     try {
-        response = await fetch(`${apiBase()}/api/v1/tts`, { method: 'POST', body });
+        response = await fetch(`${apiBase()}/v1/tts`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(body),
+        });
     } catch {
-        throw new Error('TTS 服务未就绪');
+        throw new Error('语音网关未就绪');
     }
     if (!response.ok) {
-        let detail = `TTS 失败 (${response.status})`;
+        let detail = `语音生成失败 (${response.status})`;
         try {
             const data = await response.json();
-            if (data.detail) detail = typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail);
+            const message = data.detail || data.error;
+            if (typeof message === 'string') detail = message;
         } catch { /* 非 JSON 错误体 */ }
         throw new Error(detail);
     }
-    const doneEvent = await readSse(response);
-    const wavPath = doneEvent.wav.startsWith('/') ? `${apiBase()}${doneEvent.wav}` : doneEvent.wav;
-    const wav = await fetch(wavPath);
-    if (!wav.ok) throw new Error('音频下载失败');
-    const url = URL.createObjectURL(await wav.blob());
-    memory.set(key, url);
+    const url = URL.createObjectURL(await response.blob());
+    memory.set(segment.key, url);
     return url;
 }
 
@@ -537,7 +330,7 @@ function bubblesByKey(key) {
 function enqueue(btn, { autoplay = false } = {}) {
     if (!btn || btn.dataset.status !== 'waiting') return;
     const key = btn.dataset.key;
-    const cached = voiceName ? memory.get(`${voiceName}\n${btn.dataset.voiceEmotion}\n${btn.dataset.text}`) : '';
+    const cached = memory.get(key) || '';
     if (cached) {
         btn.dataset.status = 'ready';
         btn.dataset.audioUrl = cached;
@@ -588,11 +381,19 @@ async function pump() {
             try {
                 btn.dataset.status = 'generating';
                 btn.classList.add('loading');
+                let director = null;
+                if (btn.dataset.director) {
+                    try { director = JSON.parse(btn.dataset.director); } catch { director = null; }
+                }
                 const url = await fetchAudio({
+                    key,
                     speaker: btn.dataset.voiceName,
                     emotion: btn.dataset.voiceEmotion || 'default',
                     text: btn.dataset.text,
+                    director,
+                    fresh: btn.dataset.fresh === '1',
                 });
+                delete btn.dataset.fresh;
                 bubblesByKey(key).forEach((node) => {
                     node.dataset.status = 'ready';
                     node.dataset.audioUrl = url;
@@ -654,14 +455,13 @@ function scan() {
 
 function rerollBubble(btn) {
     if (!btn) return;
-    const emotion = btn.dataset.voiceEmotion || 'default';
-    const text = btn.dataset.text || '';
-    if (voiceName) memory.delete(`${voiceName}\n${emotion}\n${text}`);
+    memory.delete(btn.dataset.key);
     bubblesByKey(btn.dataset.key).forEach((node) => {
         node.dataset.status = 'waiting';
         node.removeAttribute('data-audio-url');
         node.classList.remove('loading', 'playing', 'error');
     });
+    btn.dataset.fresh = '1';
     enqueue(btn, { autoplay: false });
     pump();
 }
@@ -792,10 +592,6 @@ function scheduleScan() {
     scanTimer = setTimeout(() => scan(), 0);
 }
 
-function voiceHintText() {
-    return voiceName || '未选文件时用服务自带 voice_03.wav';
-}
-
 function paintControls() {
     document.querySelectorAll('[data-tad="api"]').forEach((node) => {
         if (document.activeElement !== node) node.value = apiBase();
@@ -809,28 +605,21 @@ function paintControls() {
     document.querySelectorAll('[data-tad="inject"]').forEach((node) => {
         node.checked = injectEnabled();
     });
-    document.querySelectorAll('[data-tad="voice-hint"]').forEach((node) => {
-        node.textContent = voiceHintText();
-    });
 }
 
 function commitSettings(patch) {
-    const previous = apiBase();
     if (patch.api !== undefined) localStorage.setItem(STORAGE.api, patch.api.trim() || DEFAULT_API);
     if (patch.enabled !== undefined) localStorage.setItem(STORAGE.enabled, patch.enabled ? '1' : '0');
     if (patch.auto !== undefined) localStorage.setItem(STORAGE.auto, patch.auto ? '1' : '0');
     if (patch.inject !== undefined) localStorage.setItem(STORAGE.inject, patch.inject ? '1' : '0');
     applyDialoguePrompt();
-    if (apiBase() !== previous && voiceName === 'voice_03.wav') {
-        voiceBlob = null;
-        voiceName = '';
-    }
     if (patch.enabled === false) {
         stopPlayback();
     } else if (patch.enabled === true) {
         scan();
     }
     paintControls();
+    if (patch.api !== undefined) loadEmotionNames();
     if (patch.api !== undefined || patch.enabled !== undefined) refreshStatus();
 }
 
@@ -840,16 +629,18 @@ async function refreshStatus() {
         node.className = 'tad-status';
         node.textContent = '检查中…';
     });
-    document.querySelectorAll('[data-tad="voice-hint"]').forEach((node) => {
-        node.textContent = voiceHintText();
-    });
-    let text = 'IndexTTS 未就绪';
+    let text = '语音网关未就绪';
     let ok = false;
     try {
-        const response = await fetch(`${apiBase()}/api/v1/health`);
+        const response = await fetch(`${apiBase()}/health`);
         if (!response.ok) throw new Error(String(response.status));
-        text = 'IndexTTS 在线';
-        ok = true;
+        const data = await response.json().catch(() => ({}));
+        if (data.studio && data.studio.online === false) {
+            text = '网关在线，7860 未就绪';
+        } else {
+            text = '语音网关在线';
+            ok = true;
+        }
     } catch { /* 面板上显示未就绪 */ }
     nodes.forEach((node) => {
         node.textContent = text;
@@ -865,7 +656,7 @@ function appendSettingsFields(parent) {
 
     const apiLabel = document.createElement('label');
     apiLabel.className = 'tad-field';
-    apiLabel.append(document.createTextNode('IndexTTS 地址'));
+    apiLabel.append(document.createTextNode('语音网关'));
     const apiInput = document.createElement('input');
     apiInput.type = 'text';
     apiInput.className = 'text_pole';
@@ -878,18 +669,9 @@ function appendSettingsFields(parent) {
     check.className = 'tad-check';
     check.textContent = '检查连接';
 
-    const voiceLabel = document.createElement('label');
-    voiceLabel.className = 'tad-field';
-    voiceLabel.append(document.createTextNode('音色参考'));
-    const voiceInput = document.createElement('input');
-    voiceInput.type = 'file';
-    voiceInput.accept = 'audio/*,.wav,.mp3,.flac,.ogg,.opus';
-    voiceInput.dataset.tad = 'voice';
-    voiceLabel.append(voiceInput);
-    const voiceHint = document.createElement('div');
-    voiceHint.className = 'tad-hint';
-    voiceHint.dataset.tad = 'voice-hint';
-    voiceHint.textContent = voiceHintText();
+    const hint = document.createElement('div');
+    hint.className = 'tad-hint';
+    hint.textContent = '音色在网关的角色配置里。对白标记里的角色名用来选择音色，这里不再上传参考音频。';
 
     const switches = document.createElement('div');
     switches.className = 'tad-switches';
@@ -900,29 +682,24 @@ function appendSettingsFields(parent) {
     ]) {
         const row = document.createElement('label');
         row.className = 'tad-switch';
-        const text = document.createElement('span');
-        text.textContent = label;
+        const name = document.createElement('span');
+        name.textContent = label;
         const input = document.createElement('input');
         input.type = 'checkbox';
         input.dataset.tad = key;
-        row.append(text, input);
+        row.append(name, input);
         switches.append(row);
     }
 
     apiInput.addEventListener('change', () => commitSettings({ api: apiInput.value }));
     check.addEventListener('click', () => refreshStatus());
-    voiceInput.addEventListener('change', () => {
-        const file = voiceInput.files && voiceInput.files[0];
-        if (!file) return;
-        rememberVoice(file, file.name).then(() => paintControls());
-    });
     switches.addEventListener('change', (event) => {
         const input = event.target;
         if (!(input instanceof HTMLInputElement) || input.type !== 'checkbox') return;
         commitSettings({ [input.dataset.tad]: input.checked });
     });
 
-    parent.append(status, apiLabel, check, voiceLabel, voiceHint, switches);
+    parent.append(status, apiLabel, check, hint, switches);
 }
 
 function openSheet() {
@@ -1068,7 +845,11 @@ function mountExtensionSettings() {
 }
 
 function init() {
+    if ((localStorage.getItem(STORAGE.api) || '').replace(/\/+$/, '') === LEGACY_API) {
+        localStorage.setItem(STORAGE.api, DEFAULT_API);
+    }
     applyDialoguePrompt();
+    loadEmotionNames();
     buildShell();
     mountExtensionSettings();
     if (event_types.APP_READY) {
