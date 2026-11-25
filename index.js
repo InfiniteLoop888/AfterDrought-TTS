@@ -39,10 +39,17 @@ const TEXT_EMOTIONS = {
     '耳语': '用很轻的气声耳语，音量低，像在贴着耳朵说话',
 };
 
+const BARS_HTML = '<span class="sovits-voice-waves"><span class="sovits-voice-bar"></span><span class="sovits-voice-bar"></span><span class="sovits-voice-bar"></span></span>';
+const SYSTEM_KEYWORDS = /^(?:ONSTAGE|RECALL|ARCHIVE|FLOOR|STATUS|SYS|VAR|STAGE|SYSTEM|CONFIG|DATA|MEMORY|DATABASE|DEBUG|INFO|ERROR|WARN|TAG|SETTING|VALUE|VARIABLE)$/i;
+
 const memory = new Map();
+const pending = new Set();
+const genQueue = [];
 let audio = null;
 let playToken = 0;
 let scanTimer = 0;
+let pumping = false;
+let playNewReply = false;
 let voiceBlob = null;
 let voiceName = '';
 
@@ -120,47 +127,94 @@ function generating() {
     return getComputedStyle(stop).display !== 'none';
 }
 
-function cleanText(text) {
-    return text
-        .replace(/<think>[\s\S]*?<\/think>/gi, '')
-        .replace(/```[\s\S]*?```/g, '')
-        .replace(/[^\S\n]+/g, ' ')
-        .replace(/ *\n */g, '\n')
-        .trim();
+function escapeHtmlAttr(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
 }
 
-function parseSegments(raw) {
-    const text = cleanText(raw);
-    if (!text) return [];
+function knownSpeakers() {
+    const names = new Set();
+    const add = (name) => {
+        const clean = String(name || '').trim().toLowerCase();
+        if (clean) names.add(clean);
+    };
+    add(currentCharacterName());
+    try {
+        add(globalThis.SillyTavern?.getContext?.()?.name2);
+    } catch { /* 没有角色上下文时，无引号对白只在名单为空时收下 */ }
+    return names;
+}
 
-    const re = /[\[【]([^,，\]】\n]{1,30})\s*[,，]\s*([^\]】\n]{1,30})[\]】]/g;
-    const matches = [...text.matchAll(re)];
-    const tagged = [];
-    for (let i = 0; i < matches.length; i++) {
-        const speaker = matches[i][1].trim();
-        const emotion = matches[i][2].trim();
-        if (!speaker || emotion.toLowerCase() === 'new') continue;
-        if (/^\d+$/.test(speaker) || /\d|[:：/\\]/.test(emotion)) continue;
-        const start = matches[i].index + matches[i][0].length;
-        const end = i + 1 < matches.length ? matches[i + 1].index : text.length;
-        const line = spokenLine(text, start, end);
-        if (!line) continue;
-        tagged.push({ speaker, emotion: emotion || 'default', text: line });
+function visibleText(value) {
+    return String(value || '').replace(/<[^>]+>|&lt;[^&]+&gt;|&nbsp;/gi, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function bubbleKey(speaker, emotion, text) {
+    return `${speaker}\n${emotion}\n${text}`;
+}
+
+function buildBubbleHtml(speaker, emotion, text) {
+    const key = bubbleKey(speaker, emotion, text);
+    const cached = voiceName ? memory.get(`${voiceName}\n${emotion}\n${text}`) : '';
+    const status = cached ? 'ready' : (pending.has(key) ? 'queued' : 'waiting');
+    const loading = status === 'queued' ? ' loading' : '';
+    const width = Math.min(220, 60 + Math.max(2, Math.ceil(text.length * 0.25)) * 10);
+    const seconds = Math.max(2, Math.ceil(text.length * 0.25));
+    const url = cached ? ` data-audio-url="${escapeHtmlAttr(cached)}"` : '';
+    return `<span class="voice-bubble${loading}" style="width: ${width}px" data-status="${status}" data-key="${escapeHtmlAttr(key)}"${url} data-text="${escapeHtmlAttr(text)}" data-voice-name="${escapeHtmlAttr(speaker)}" data-voice-emotion="${escapeHtmlAttr(emotion)}">${BARS_HTML}<span class="sovits-voice-duration">${seconds}&quot;</span></span>`;
+}
+
+function parseTextToBubbles(html) {
+    let source = html.replace(/[\[【]([^\],:【】\[\]\n]{1,30})\s*[,，]\s*(?:New|new)[\]】]/g, (match, speaker) => {
+        const name = speaker.trim();
+        if (!name || /^\d+$/.test(name) || SYSTEM_KEYWORDS.test(name)) return match;
+        return `[${name}, default]`;
+    });
+
+    const known = knownSpeakers();
+    const tagRe = /[\[【]([^\],:【】\[\]\n]{1,30})\s*[,，]\s*([^\]】\n]{1,30})[\]】]/g;
+    let result = '';
+    let lastIndex = 0;
+    let matched = false;
+    let match;
+    while ((match = tagRe.exec(source)) !== null) {
+        const speaker = match[1].trim();
+        const emotion = match[2].trim();
+        const tagEnd = match.index + match[0].length;
+        if (!speaker || emotion.toLowerCase() === 'new' || speaker.toLowerCase().startsWith('tts')) continue;
+        if (
+            /\d|[:：+\-/\\%=><]/.test(emotion)
+            || SYSTEM_KEYWORDS.test(speaker)
+            || /^\d+$/.test(speaker)
+            || emotion.length > 20
+        ) continue;
+
+        const stripped = source.slice(tagEnd).replace(/^(?:<[^>]+>|[:：\s]|&nbsp;)+/gi, '');
+        let spoken = '';
+        let quoted = false;
+        const quoteMatch = stripped.match(/^(?:([“"「『]|&ldquo;|&quot;|&#8220;)([\s\S]*?)([”"」』]|&rdquo;|&quot;|&#8221;))/i);
+        if (quoteMatch && quoteMatch[2]) {
+            spoken = visibleText(quoteMatch[2]);
+            quoted = true;
+        }
+        if (!spoken && (known.has(speaker.toLowerCase()) || known.size === 0)) {
+            const plain = stripped.match(/^([^<\[【\n\r]+)/);
+            const candidate = plain ? visibleText(plain[1]) : '';
+            if (candidate.length > 1) spoken = candidate;
+        }
+        if (!spoken || (!quoted && known.size > 0 && !known.has(speaker.toLowerCase()))) continue;
+
+        matched = true;
+        result += source.slice(lastIndex, match.index);
+        lastIndex = tagEnd;
+        result += buildBubbleHtml(speaker, emotion || 'default', spoken);
     }
-    if (tagged.length) return tagged;
-    return [{ speaker: 'default', emotion: 'default', text }];
-}
-
-function spokenLine(text, start, end) {
-    const chunk = text.slice(start, end).replace(/^[\s:：]+/, '');
-    const quoted = chunk.match(/^[“"「『]([\s\S]*?)[”"」』]/);
-    if (quoted && quoted[1].trim()) return quoted[1].trim();
-    const line = (chunk.split(/\r?\n/, 1)[0] || '').replace(/^[“"「『]+|[”"」』]+$/g, '').trim();
-    return line;
-}
-
-function signature(segments) {
-    return JSON.stringify(segments);
+    if (!matched) return html;
+    return result + source.slice(lastIndex);
 }
 
 function emotionFields(emotion) {
@@ -192,6 +246,12 @@ async function rememberVoice(blob, name) {
     voiceBlob = blob;
     voiceName = name || 'voice.wav';
     memory.clear();
+    document.querySelectorAll('.voice-bubble').forEach((btn) => {
+        btn.dataset.status = 'waiting';
+        btn.removeAttribute('data-audio-url');
+        btn.classList.remove('loading', 'playing', 'error');
+    });
+    scheduleLast(false);
     try {
         const db = await voiceDb();
         await new Promise((resolve, reject) => {
@@ -231,7 +291,10 @@ function stopPlayback() {
         audio.pause();
         audio = null;
     }
-    document.querySelectorAll('.tad-on').forEach((node) => node.classList.remove('tad-on'));
+    document.querySelectorAll('.voice-bubble.playing').forEach((node) => node.classList.remove('playing'));
+    document.querySelectorAll('.voice-bubble[data-autoplay="1"]').forEach((node) => {
+        delete node.dataset.autoplay;
+    });
 }
 
 async function readSse(response) {
@@ -309,98 +372,115 @@ function playUrl(url) {
     });
 }
 
-async function playSegments(segments, buttons, errorNode) {
-    const token = ++playToken;
-    errorNode.textContent = '';
-    for (let i = 0; i < segments.length; i++) {
-        if (token !== playToken) return;
-        buttons.forEach((button) => button.classList.remove('tad-on'));
-        buttons[i]?.classList.add('tad-on');
-        try {
-            const url = await fetchAudio(segments[i]);
-            if (token !== playToken) return;
-            await playUrl(url);
-        } catch (error) {
-            errorNode.textContent = error.message || String(error);
-            buttons.forEach((button) => button.classList.remove('tad-on'));
-            return;
-        }
-    }
-    buttons.forEach((button) => button.classList.remove('tad-on'));
+function bubblesByKey(key) {
+    return [...document.querySelectorAll('#chat .voice-bubble')].filter((btn) => btn.dataset.key === key);
 }
 
-function mountMessage(mes, { auto = false } = {}) {
-    if (!enabled()) return;
-    if (mes.getAttribute('is_user') === 'true' || mes.getAttribute('is_system') === 'true') return;
-    const textNode = mes.querySelector('.mes_text');
-    if (!textNode) return;
-
-    const segments = parseSegments(textNode.innerText || '');
-    if (!segments.length) return;
-    const sig = signature(segments);
-
-    let bar = mes.querySelector(':scope .tad-bar');
-    if (bar && bar.dataset.sig === sig) {
-        if (auto && bar.dataset.autoplayed !== '1') {
-            bar.dataset.autoplayed = '1';
-            playSegments(segments, [...bar.querySelectorAll('.tad-line')], bar.querySelector('.tad-error'));
-        }
+function enqueue(btn, { autoplay = false } = {}) {
+    if (!btn || btn.dataset.status !== 'waiting') return;
+    const key = btn.dataset.key;
+    const cached = voiceName ? memory.get(`${voiceName}\n${btn.dataset.voiceEmotion}\n${btn.dataset.text}`) : '';
+    if (cached) {
+        btn.dataset.status = 'ready';
+        btn.dataset.audioUrl = cached;
+        btn.classList.remove('loading');
+        if (autoplay) playBubble(btn);
         return;
     }
+    if (autoplay) btn.dataset.autoplay = '1';
+    if (pending.has(key)) {
+        btn.dataset.status = 'queued';
+        btn.classList.add('loading');
+        return;
+    }
+    btn.dataset.status = 'queued';
+    btn.classList.add('loading');
+    pending.add(key);
+    genQueue.push(btn);
+}
 
-    bar?.remove();
-    bar = document.createElement('div');
-    bar.className = 'tad-bar';
-    bar.dataset.sig = sig;
+async function playBubble(btn) {
+    const url = btn?.dataset.audioUrl;
+    if (!url) return;
+    const token = ++playToken;
+    document.querySelectorAll('.voice-bubble.playing').forEach((node) => node.classList.remove('playing'));
+    btn.classList.add('playing');
+    await playUrl(url);
+    if (token === playToken) btn.classList.remove('playing');
+}
 
-    const all = document.createElement('button');
-    all.type = 'button';
-    all.className = 'tad-btn';
-    all.textContent = '朗读';
-
-    const errorNode = document.createElement('span');
-    errorNode.className = 'tad-error';
-
-    const lineButtons = segments.map((segment) => {
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.className = 'tad-line';
-        const label = segment.speaker === 'default' ? segment.text : `${segment.speaker} · ${segment.text}`;
-        button.textContent = label;
-        button.title = label;
-        button.addEventListener('click', (event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            playSegments([segment], [button], errorNode);
-        });
-        return button;
-    });
-
-    all.addEventListener('click', (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        playSegments(segments, lineButtons, errorNode);
-    });
-
-    bar.append(all, ...lineButtons, errorNode);
-    const block = mes.querySelector('.mes_block') || textNode.parentElement || mes;
-    block.append(bar);
-
-    if (auto) {
-        bar.dataset.autoplayed = '1';
-        playSegments(segments, lineButtons, errorNode);
+async function pump() {
+    if (pumping) return;
+    pumping = true;
+    try {
+        while (genQueue.length) {
+            const btn = genQueue.shift();
+            const key = btn?.dataset.key;
+            if (!btn || !key) continue;
+            if (!btn.isConnected) {
+                pending.delete(key);
+                continue;
+            }
+            try {
+                btn.dataset.status = 'generating';
+                btn.classList.add('loading');
+                const url = await fetchAudio({
+                    speaker: btn.dataset.voiceName,
+                    emotion: btn.dataset.voiceEmotion || 'default',
+                    text: btn.dataset.text,
+                });
+                bubblesByKey(key).forEach((node) => {
+                    node.dataset.status = 'ready';
+                    node.dataset.audioUrl = url;
+                    node.classList.remove('loading', 'error');
+                    node.removeAttribute('title');
+                });
+                if (btn.dataset.autoplay === '1') await playBubble(btn);
+            } catch (error) {
+                bubblesByKey(key).forEach((node) => {
+                    node.dataset.status = 'error';
+                    node.classList.remove('loading');
+                    node.classList.add('error');
+                    node.title = error.message || String(error);
+                });
+            } finally {
+                pending.delete(key);
+            }
+        }
+    } finally {
+        pumping = false;
+        if (genQueue.length) pump();
     }
 }
 
-function scan({ autoLast = false } = {}) {
+function scheduleLast(autoplay) {
+    const last = document.querySelector('#chat .mes:last-child .mes_text');
+    if (!last) return;
+    last.querySelectorAll('.voice-bubble').forEach((btn) => {
+        if (autoplay && btn.dataset.status !== 'ready' && btn.dataset.status !== 'error') btn.dataset.autoplay = '1';
+        if (btn.dataset.status === 'waiting') enqueue(btn, { autoplay });
+    });
+    pump();
+}
+
+function scan() {
     if (!enabled()) return;
-    const messages = [...document.querySelectorAll('#chat .mes')];
-    const last = messages[messages.length - 1];
-    const skipLast = generating();
-    for (const mes of messages) {
-        if (skipLast && mes === last) continue;
-        mountMessage(mes, { auto: autoLast && mes === last && !skipLast });
-    }
+    const lastMes = document.querySelector('#chat .mes:last-child');
+    const streaming = generating();
+    let changedLast = false;
+    document.querySelectorAll('#chat .mes_text').forEach((node) => {
+        const mes = node.closest('.mes');
+        if (!mes || mes.getAttribute('is_user') === 'true' || mes.getAttribute('is_system') === 'true') return;
+        if (streaming && mes === lastMes) return;
+        const html = node.innerHTML;
+        if (!html || (!html.includes('[') && !html.includes('【'))) return;
+        const next = parseTextToBubbles(html);
+        if (next === html) return;
+        node.innerHTML = next;
+        if (mes === lastMes) changedLast = true;
+    });
+    if (changedLast) scheduleLast(playNewReply);
+    if (!streaming) playNewReply = false;
 }
 
 function scheduleScan() {
@@ -443,7 +523,6 @@ function commitSettings(patch) {
     }
     if (patch.enabled === false) {
         stopPlayback();
-        document.querySelectorAll('.tad-bar').forEach((node) => node.remove());
     } else if (patch.enabled === true) {
         scan();
     }
@@ -696,12 +775,36 @@ function init() {
         const observer = new MutationObserver(scheduleScan);
         observer.observe(chat, { childList: true, subtree: true, characterData: true });
     }
+    document.addEventListener('click', (event) => {
+        const btn = event.target.closest?.('.voice-bubble');
+        if (!btn || !btn.closest('#chat')) return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (!enabled()) return;
+        if (btn.classList.contains('playing')) {
+            stopPlayback();
+            return;
+        }
+        if (btn.dataset.status === 'ready') {
+            playBubble(btn);
+            return;
+        }
+        if (btn.dataset.status === 'queued' || btn.dataset.status === 'generating') {
+            btn.dataset.autoplay = '1';
+            return;
+        }
+        btn.dataset.status = 'waiting';
+        btn.classList.remove('error');
+        enqueue(btn, { autoplay: true });
+        pump();
+    });
     scan();
 
     if (event_types.GENERATION_ENDED) {
         eventSource.on(event_types.GENERATION_ENDED, () => {
             speakableGeneration = true;
-            scan({ autoLast: autoPlay() });
+            playNewReply = autoPlay();
+            scan();
         });
     }
     if (event_types.GENERATION_STARTED) {

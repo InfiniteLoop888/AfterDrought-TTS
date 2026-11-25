@@ -1,38 +1,81 @@
-.tad-bar {
-    display: flex;
-    flex-wrap: wrap;
+.voice-bubble {
+    display: inline-flex;
     align-items: center;
-    gap: 6px;
-    margin-top: 8px;
-    font-size: 12px;
-    line-height: 1.4;
-}
-
-.tad-btn,
-.tad-line {
-    border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
-    background: color-mix(in srgb, currentColor 6%, transparent);
-    color: inherit;
+    justify-content: space-between;
+    box-sizing: border-box;
+    height: 28px;
+    margin: 0 4px;
+    padding: 0 8px;
+    gap: 8px;
+    vertical-align: middle;
+    border: 1px solid color-mix(in srgb, currentColor 28%, transparent);
     border-radius: 999px;
-    padding: 2px 8px;
+    background: color-mix(in srgb, currentColor 8%, transparent);
+    color: inherit;
     cursor: pointer;
-    font: inherit;
+    user-select: none;
+    min-width: 40px;
 }
 
-.tad-line {
-    max-width: 280px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+.voice-bubble.loading {
+    animation: tad-pulse 1.5s infinite;
 }
 
-.tad-btn.tad-on,
-.tad-line.tad-on {
-    outline: 1px solid color-mix(in srgb, currentColor 50%, transparent);
+.voice-bubble[data-status="ready"] {
+    background: color-mix(in srgb, #7dcea0 18%, transparent);
 }
 
-.tad-error {
-    color: #d4544a;
+.voice-bubble.playing {
+    background: color-mix(in srgb, #9bb6ff 28%, transparent);
+}
+
+.voice-bubble.error {
+    background: color-mix(in srgb, #d4544a 18%, transparent);
+    border-color: #d4544a;
+}
+
+.sovits-voice-waves {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    height: 70%;
+}
+
+.sovits-voice-bar {
+    width: 3px;
+    height: 7px;
+    border-radius: 2px;
+    background: currentColor;
+    opacity: 0.7;
+}
+
+.voice-bubble.playing .sovits-voice-bar {
+    animation: tad-wave 1s infinite ease-in-out;
+}
+
+.voice-bubble.playing .sovits-voice-bar:nth-child(2) {
+    animation-delay: 0.15s;
+}
+
+.voice-bubble.playing .sovits-voice-bar:nth-child(3) {
+    animation-delay: 0.3s;
+}
+
+.sovits-voice-duration {
+    font-size: 11px;
+    opacity: 0.8;
+}
+
+@keyframes tad-wave {
+    0%,
+    100% { height: 7px; opacity: 0.6; }
+    50% { height: 12px; opacity: 1; }
+}
+
+@keyframes tad-pulse {
+    0%,
+    100% { opacity: 0.65; }
+    50% { opacity: 1; }
 }
 
 #tad-fab {
