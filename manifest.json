@@ -1,0 +1,10 @@
+{
+    "name": "tts-afterdrought",
+    "display_name": "TTS Afterdrought",
+    "version": "0.1.0",
+    "author": "local",
+    "description": "把酒馆对白直接发给本机 TTS 服务并播放。",
+    "loading_location": "before_body",
+    "js": "index.js",
+    "css": "style.css"
+}
