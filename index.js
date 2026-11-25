@@ -31,6 +31,8 @@ const genQueue = [];
 const autoList = [];
 let audio = null;
 let playToken = 0;
+let speechAbort = new AbortController();
+let readingMes = null;
 let draining = false;
 let scanTimer = 0;
 let pumping = false;
@@ -122,8 +124,15 @@ function playbackSettings() {
 }
 
 function compatMode() {
-    const playback = playbackSettings();
-    return playback.compat === true || playback.scope === 'full';
+    return playbackSettings().compat === true;
+}
+
+function fullScope() {
+    return playbackSettings().scope === 'full';
+}
+
+function skipRewrite() {
+    return compatMode();
 }
 
 function renderMode() {
@@ -185,7 +194,7 @@ function rosterSignature(list) {
             .map((alias) => String(alias || '').trim())
             .filter(Boolean)
             .join('\u0001');
-        return `${name}\u0002${aliases}`;
+        return `${name}\u0002${aliases}\u0002${item.version ?? ''}`;
     }).join('\n');
 }
 
@@ -202,6 +211,7 @@ async function loadGatewayCharacters() {
         const changed = rosterSignature(next) !== rosterSignature(gatewayCharacters);
         gatewayCharacters = next;
         releaseUnknownVoices();
+        refreshVoiceKeys();
         if (changed) {
             applyDialoguePrompt();
             paintControls();
@@ -355,11 +365,17 @@ function applyRegexFilters(text) {
 
 function splitSentences(text) {
     const parts = [];
+    const opens = '“「『';
+    const closes = '”」』';
     for (const block of String(text || '').replace(/\r/g, '').split(/\n+/)) {
         let buf = '';
+        let quoted = 0;
         for (const ch of block) {
             buf += ch;
-            if (/[。！？!?…]/.test(ch)) {
+            if (ch === '"') quoted += quoted > 0 ? -1 : 1;
+            else if (opens.includes(ch)) quoted += 1;
+            else if (closes.includes(ch)) quoted = Math.max(0, quoted - 1);
+            if (quoted === 0 && /[。！？!?…]/.test(ch)) {
                 if (buf.trim()) parts.push(buf.trim());
                 buf = '';
             }
@@ -416,8 +432,16 @@ function segmentText(director) {
     return director.segments.map((item) => (item && item.text) || '').join('').trim();
 }
 
+function voiceRevision(speaker) {
+    const key = String(speaker || '').trim().toLowerCase();
+    if (!key || !gatewayCharacters.length) return '';
+    const item = gatewayCharacters.find((entry) => [entry.character_id, entry.display_name, ...(Array.isArray(entry.aliases) ? entry.aliases : [])]
+        .some((part) => String(part || '').trim().toLowerCase() === key));
+    return item && item.version != null ? String(item.version) : '';
+}
+
 function bubbleKey(speaker, emotion, text, director = '') {
-    return `${speaker}\n${emotion}\n${text}\n${director}`;
+    return `${speaker}\n${emotion}\n${text}\n${director}\n${voiceRevision(speaker)}`;
 }
 
 function voiceAttrs(speaker, emotion, text, settled, director) {
@@ -482,6 +506,31 @@ function forgetVoice(key) {
     if (queued >= 0) genQueue.splice(queued, 1);
     const auto = autoList.indexOf(key);
     if (auto >= 0) autoList.splice(auto, 1);
+}
+
+function dropCachedAudio(key) {
+    const url = memory.get(key);
+    if (url) URL.revokeObjectURL(url);
+    memory.delete(key);
+    audioStore.delete(key);
+    forgetVoice(key);
+}
+
+function refreshVoiceKeys() {
+    document.querySelectorAll(`#chat ${VOICE_NODE}`).forEach((node) => {
+        const next = bubbleKey(
+            node.dataset.voiceName,
+            node.dataset.voiceEmotion || 'default',
+            node.dataset.text || '',
+            node.dataset.director || '',
+        );
+        if (!node.dataset.key || node.dataset.key === next) return;
+        dropCachedAudio(node.dataset.key);
+        node.dataset.key = next;
+        node.dataset.status = 'waiting';
+        node.removeAttribute('data-audio-url');
+        node.classList.remove('loading', 'playing', 'error');
+    });
 }
 
 function releaseVoiceNode(node) {
@@ -890,14 +939,22 @@ let folderHandle = null;
 
 function stopPlayback() {
     playToken += 1;
+    readingMes = null;
+    speechAbort.abort();
+    speechAbort = new AbortController();
+    genQueue.splice(0, genQueue.length);
+    pending.clear();
     autoList.splice(0, autoList.length);
     if (audio) {
         audio.pause();
         audio = null;
     }
-    document.querySelectorAll(`${VOICE_NODE}.playing`).forEach((node) => node.classList.remove('playing'));
-    document.querySelectorAll(`${VOICE_NODE}[data-autoplay="1"]`).forEach((node) => {
+    document.querySelectorAll(VOICE_NODE).forEach((node) => {
+        node.classList.remove('playing', 'loading');
         delete node.dataset.autoplay;
+        if (node.dataset.status === 'generating' || node.dataset.status === 'queued') {
+            node.dataset.status = 'waiting';
+        }
     });
 }
 
@@ -911,6 +968,8 @@ function sessionId() {
 }
 
 async function fetchAudio(segment) {
+    const signal = speechAbort.signal;
+    if (signal.aborted) throw new DOMException('已取消', 'AbortError');
     if (!segment.fresh && memory.has(segment.key)) return memory.get(segment.key);
     const preset = segment.emotion && segment.emotion !== 'default' ? segment.emotion : null;
     const body = {
@@ -937,6 +996,7 @@ async function fetchAudio(segment) {
             method: 'POST',
             headers: apiHeaders({ 'content-type': 'application/json' }),
             body: JSON.stringify(body),
+            signal,
         });
     } catch {
         throw new Error('语音网关未就绪');
@@ -959,6 +1019,7 @@ async function fetchAudio(segment) {
         throw new Error(detail);
     }
     const blob = await response.blob();
+    if (signal.aborted) throw new DOMException('已取消', 'AbortError');
     const url = URL.createObjectURL(blob);
     memory.set(segment.key, url);
     audioStore.put({
@@ -983,6 +1044,7 @@ function playUrl(url) {
             resolve();
         };
         next.onended = finish;
+        next.onpause = finish;
         next.onerror = finish;
         next.play().catch(finish);
     });
@@ -1034,7 +1096,8 @@ function enqueue(btn, { autoplay = false } = {}) {
 
 function enqueueSegment(segment) {
     const key = segment?.key;
-    if (!key) return;
+    if (!key || speechAbort.signal.aborted) return;
+    const generation = speechAbort.signal;
     if (segment.autoplay && !autoList.includes(key)) autoList.push(key);
     if (!segment.fresh && memory.has(key)) {
         markReady(key, memory.get(key));
@@ -1050,7 +1113,7 @@ function enqueueSegment(segment) {
     genQueue.push(segment);
     if (!segment.fresh) {
         audioStore.get(key).then((record) => {
-            if (!record?.blob || !pending.has(key)) return;
+            if (generation.aborted || !record?.blob || !pending.has(key)) return;
             const index = genQueue.findIndex((item) => item.key === key);
             if (index >= 0) genQueue.splice(index, 1);
             const url = URL.createObjectURL(record.blob);
@@ -1122,6 +1185,7 @@ async function drainAutoplay() {
     } finally {
         draining = false;
         if (autoList.length && token === playToken) considerDrain();
+        else if (token === playToken) readingMes = null;
     }
 }
 
@@ -1146,6 +1210,7 @@ async function pump() {
                 const url = await fetchAudio(segment);
                 markReady(key, url);
             } catch (error) {
+                if (error?.name === 'AbortError') continue;
                 if (error instanceof SkipVoice) {
                     releaseVoice(key);
                     continue;
@@ -1200,37 +1265,85 @@ function segmentsFromPlain(text) {
     });
 }
 
-function fullSegments(text, speaker) {
-    const clean = applyRegexFilters(text).replace(/[\[【][^\]】\n]{0,80}[\]】]/g, ' ');
-    return splitSentences(clean).map((line) => {
-        const directed = takeDirector(line);
-        const spoken = directed.text || line;
-        const directorText = directed.director ? JSON.stringify(directed.director) : '';
-        return {
-            key: bubbleKey(speaker, 'default', spoken, directorText),
-            speaker,
-            emotion: 'default',
-            text: spoken,
-            director: directed.director,
-            fresh: false,
-            autoplay: false,
-        };
+function markupToSpeech(text) {
+    let source = applyRegexFilters(String(text || ''))
+        .replace(/<(tucao|advice|think)\b[^>]*>[\s\S]*?<\/\1>/gi, '');
+    source = source.replace(/[\[【][^\],:【】\[\]\n]{1,30}[\]】]\s*〖vd:([\s\S]*?)〗/g, (_, json) => {
+        try {
+            return segmentText(JSON.parse(json));
+        } catch {
+            return '';
+        }
     });
+    source = source.replace(/[\[【][^\],:【】\[\]\n]{1,30}\s*[,，]\s*[^\]】\n]{1,40}[\]】]\s*([“"「『][^”"」』]*[”"」』])/g, '$1');
+    source = source.replace(/〖vd:[\s\S]*?〗/g, '');
+    source = source.replace(/[\[【][^\],:【】\[\]\n]{1,30}(?:\s*[,，]\s*[^\]】\n]{1,40})?[\]】]/g, '');
+    return source;
+}
+
+function fullSegments(text, speaker) {
+    return splitSentences(markupToSpeech(text)).map((line) => ({
+        key: bubbleKey(speaker, 'default', line, ''),
+        speaker,
+        emotion: 'default',
+        text: line,
+        director: null,
+        fresh: false,
+        autoplay: false,
+    }));
+}
+
+function queueMessage(mes, autoplay, full = false) {
+    if (!mes || mes.getAttribute('is_user') === 'true') return;
+    stopPlayback();
+    const id = Number(mes.getAttribute('mesid'));
+    const entry = chatContext()?.chat?.[id];
+    const raw = typeof entry?.mes === 'string' ? entry.mes : (mes.querySelector('.mes_text')?.innerText || '');
+    const speaker = String(entry?.name || currentCharacterName() || '').trim();
+    if (!speaker || (gatewayCharacters.length && !speakerKnown(speaker))) {
+        notify('warning', speaker ? `${speaker} 没有配音` : '没有可朗读的内容');
+        return;
+    }
+    const segments = (full || fullScope()) ? fullSegments(raw, speaker) : segmentsFromPlain(raw);
+    if (!segments.length) {
+        notify('warning', '没有可朗读的内容');
+        return;
+    }
+    readingMes = mes;
+    segments.forEach((segment) => enqueueSegment({ ...segment, autoplay: !!autoplay }));
 }
 
 function queueLastMessage(autoplay) {
     const mes = [...document.querySelectorAll('#chat .mes')].pop();
-    if (!mes || mes.getAttribute('is_user') === 'true') return;
-    const id = Number(mes.getAttribute('mesid'));
-    const entry = chatContext()?.chat?.[id];
-    const raw = typeof entry?.mes === 'string' ? entry.mes : (mes.querySelector('.mes_text')?.innerText || '');
-    const speaker = String(entry?.name || currentCharacterName() || '旁白');
-    const segments = playbackSettings().scope === 'full' ? fullSegments(raw, speaker) : segmentsFromPlain(raw);
-    if (!segments.length) {
-        if (autoplay) notify('warning', '没有可朗读的内容');
-        return;
-    }
-    segments.forEach((segment) => enqueueSegment({ ...segment, autoplay: !!autoplay }));
+    queueMessage(mes, autoplay, fullScope());
+}
+
+function mountFullButtons() {
+    document.querySelectorAll('#chat .mes').forEach((mes) => {
+        const existing = mes.querySelector('.tad-full-play');
+        if (!fullScope() || mes.getAttribute('is_user') === 'true') {
+            existing?.remove();
+            return;
+        }
+        const row = mes.querySelector('.mes_buttons');
+        if (!row || existing) return;
+        const btn = document.createElement('div');
+        btn.className = 'mes_button tad-full-play';
+        btn.title = '朗读这条消息';
+        const icon = document.createElement('i');
+        icon.className = 'fa-solid fa-volume-high';
+        btn.append(icon);
+        btn.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            if (readingMes === mes) {
+                stopPlayback();
+                return;
+            }
+            queueMessage(mes, true, true);
+        });
+        row.append(btn);
+    });
 }
 
 function scheduleLast(autoplay) {
@@ -1245,7 +1358,8 @@ function scheduleLast(autoplay) {
 }
 
 function scan() {
-    if (!enabled() || compatMode()) return;
+    mountFullButtons();
+    if (!enabled() || skipRewrite()) return;
     let changed = false;
     document.querySelectorAll(BUBBLE_ROOTS).forEach((node) => {
         if (!node.isConnected || node.closest(VOICE_NODE) || node.querySelector?.('#curEditTextarea')) return;
@@ -1515,7 +1629,8 @@ function commitSettings(patch) {
     if (patch.prompt || patch.playback || patch.notify || patch.regexFilters) saveSettings(settings);
     applyDialoguePrompt();
     if (patch.enabled === false || patch.render !== undefined || refreshView) stopPlayback();
-    if (patch.enabled === true && !compatMode()) scan();
+    if (patch.enabled === true && !skipRewrite()) scan();
+    else if (patch.playback) mountFullButtons();
     paintControls();
     if (patch.regexFilters) renderRegexLists();
     if (patch.render !== undefined || refreshView) refreshRenderedMessages();
@@ -1923,7 +2038,7 @@ function playbackModule() {
     bufferLabel.append(buffer);
     const note = document.createElement('div');
     note.className = 'tad-hint';
-    note.textContent = '全文和前端卡兼容不改写正文。自动合成只生成，自动朗读会按缓冲句数开播。';
+    note.textContent = '全文同样渲染对白，朗读时按整条消息逐句读，用消息上的喇叭重听。前端卡兼容不改写正文。自动合成只生成，自动朗读会按缓冲句数开播。';
     switches.addEventListener('change', (event) => {
         const input = event.target;
         if (!(input instanceof HTMLInputElement)) return;
@@ -2247,12 +2362,16 @@ function init() {
             if (compatMode()) {
                 if (autoplay || playbackSettings().autoInfer) queueLastMessage(autoplay);
             } else {
-                playNewReply = autoplay;
+                playNewReply = fullScope() ? false : autoplay;
                 scan();
                 lastMesText()?.querySelectorAll(`${VOICE_NODE}[data-settled="0"]`).forEach((btn) => {
                     btn.dataset.settled = '1';
                 });
-                scheduleLast(autoplay);
+                if (fullScope()) {
+                    if (autoplay || playbackSettings().autoInfer) queueLastMessage(autoplay);
+                } else {
+                    scheduleLast(autoplay);
+                }
             }
         });
     }

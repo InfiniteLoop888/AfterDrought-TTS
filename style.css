@@ -95,6 +95,10 @@
     animation-delay: 0.3s;
 }
 
+.tad-full-play {
+    cursor: pointer;
+}
+
 .tad-line {
     display: inline;
     border-radius: 3px;
