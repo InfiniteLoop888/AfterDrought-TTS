@@ -25,8 +25,10 @@ const INLINE_TAG = /^<\/?(?:em|strong|b|i|u|q|code|mark|small|sub|sup|font|span|
 const LONG_PRESS_MS = 550;
 const SYSTEM_KEYWORDS = /^(?:ONSTAGE|RECALL|ARCHIVE|FLOOR|STATUS|SYS|VAR|STAGE|SYSTEM|CONFIG|DATA|MEMORY|DATABASE|DEBUG|INFO|ERROR|WARN|TAG|SETTING|VALUE|VARIABLE)$/i;
 
+const REQUEST_TIMEOUT_MS = 120000;
 const memory = new Map();
 const pending = new Set();
+const inflightRequests = new Map();
 const genQueue = [];
 const autoList = [];
 let audio = null;
@@ -194,7 +196,7 @@ function rosterSignature(list) {
             .map((alias) => String(alias || '').trim())
             .filter(Boolean)
             .join('\u0001');
-        return `${name}\u0002${aliases}\u0002${item.version ?? ''}`;
+        return `${name}\u0002${aliases}\u0002${item.version ?? ''}\u0002${item.voice_revision ?? ''}\u0002${item.synthesis_revision ?? ''}`;
     }).join('\n');
 }
 
@@ -432,12 +434,20 @@ function segmentText(director) {
     return director.segments.map((item) => (item && item.text) || '').join('').trim();
 }
 
+function gatewayCharacter(name) {
+    const key = String(name || '').trim().toLowerCase();
+    if (!key) return null;
+    return gatewayCharacters.find((entry) => [entry.character_id, entry.display_name, ...(Array.isArray(entry.aliases) ? entry.aliases : [])]
+        .some((part) => String(part || '').trim().toLowerCase() === key)) || null;
+}
+
+// 网关照它实际用的参考音频和推理配置给版本号。网关没给时退回角色配置的修改时间。
 function voiceRevision(speaker) {
-    const key = String(speaker || '').trim().toLowerCase();
-    if (!key || !gatewayCharacters.length) return '';
-    const item = gatewayCharacters.find((entry) => [entry.character_id, entry.display_name, ...(Array.isArray(entry.aliases) ? entry.aliases : [])]
-        .some((part) => String(part || '').trim().toLowerCase() === key));
-    return item && item.version != null ? String(item.version) : '';
+    const item = gatewayCharacter(speaker);
+    if (!item) return '';
+    const voice = item.voice_revision ?? item.version ?? '';
+    const synthesis = item.synthesis_revision ?? '';
+    return `${voice}\u0003${synthesis}`;
 }
 
 function bubbleKey(speaker, emotion, text, director = '') {
@@ -482,10 +492,7 @@ function buildLineHtml(speaker, emotion, text, settled = true, director = null) 
 
 function speakerKnown(name) {
     if (!gatewayCharacters.length) return true;
-    const key = String(name || '').trim().toLowerCase();
-    if (!key) return false;
-    return gatewayCharacters.some((item) => [item.character_id, item.display_name, ...(Array.isArray(item.aliases) ? item.aliases : [])]
-        .some((part) => String(part || '').trim().toLowerCase() === key));
+    return gatewayCharacter(name) !== null;
 }
 
 function keptHtml(speaker, text) {
@@ -937,7 +944,21 @@ const audioStore = {
 
 let folderHandle = null;
 
+// 浏览器断开只是停止等待，网关那边的任务要单独撤回。
+function cancelRemote(requestIds) {
+    const ids = requestIds.filter(Boolean);
+    if (!ids.length) return;
+    fetch(`${apiBase()}/v1/tts/cancel`, {
+        method: 'POST',
+        headers: apiHeaders({ 'content-type': 'application/json' }),
+        body: JSON.stringify({ request_ids: ids, session_id: sessionId() }),
+        keepalive: true,
+    }).catch(() => { /* 旧版网关没有取消接口时忽略 */ });
+}
+
 function stopPlayback() {
+    const stale = [...inflightRequests.values()];
+    inflightRequests.clear();
     playToken += 1;
     readingMes = null;
     speechAbort.abort();
@@ -956,6 +977,7 @@ function stopPlayback() {
             node.dataset.status = 'waiting';
         }
     });
+    cancelRemote(stale);
 }
 
 function sessionId() {
@@ -971,9 +993,36 @@ async function fetchAudio(segment) {
     const signal = speechAbort.signal;
     if (signal.aborted) throw new DOMException('已取消', 'AbortError');
     if (!segment.fresh && memory.has(segment.key)) return memory.get(segment.key);
+    const requestId = segment.fresh ? `${segment.key}:${Date.now()}` : `${sessionId()}:${segment.key}`;
+    const controller = new AbortController();
+    const relay = () => controller.abort();
+    let timedOut = false;
+    signal.addEventListener('abort', relay);
+    const timer = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+    }, REQUEST_TIMEOUT_MS);
+    inflightRequests.set(segment.key, requestId);
+    try {
+        return await requestAudio(segment, requestId, controller.signal);
+    } catch (error) {
+        if (timedOut) {
+            cancelRemote([requestId]);
+            throw new Error(`语音网关 ${Math.round(REQUEST_TIMEOUT_MS / 1000)} 秒没有返回`);
+        }
+        if (error?.name === 'AbortError') throw new DOMException('已取消', 'AbortError');
+        throw error;
+    } finally {
+        clearTimeout(timer);
+        signal.removeEventListener('abort', relay);
+        if (inflightRequests.get(segment.key) === requestId) inflightRequests.delete(segment.key);
+    }
+}
+
+async function requestAudio(segment, requestId, signal) {
     const preset = segment.emotion && segment.emotion !== 'default' ? segment.emotion : null;
     const body = {
-        request_id: segment.fresh ? `${segment.key}:${Date.now()}` : `${sessionId()}:${segment.key}`,
+        request_id: requestId,
         session_id: sessionId(),
         character_id: segment.speaker,
         emotion: { type: 'vector', preset, vector: null, weight: null },
@@ -998,7 +1047,8 @@ async function fetchAudio(segment) {
             body: JSON.stringify(body),
             signal,
         });
-    } catch {
+    } catch (error) {
+        if (error?.name === 'AbortError') throw error;
         throw new Error('语音网关未就绪');
     }
     const skipHeader = response.headers.get('x-tts-skip');
