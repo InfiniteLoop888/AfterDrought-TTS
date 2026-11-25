@@ -164,7 +164,7 @@ async function loadEmotionNames() {
 
 function characterRosterText() {
     if (!gatewayCharacters.length) {
-        return '语音网关的角色表还没有读到。开口的人按剧情写出全名，不要只写姓、称呼或代词。同一个人全篇只用这一个名字。';
+        return '（角色表还没有读到。）';
     }
     const lines = gatewayCharacters.map((item) => {
         const name = String(item.display_name || item.character_id || '').trim();
@@ -174,10 +174,8 @@ function characterRosterText() {
             .filter((alias) => alias && alias !== name);
         return aliases.length ? `${name}（别名：${aliases.join('、')}）` : name;
     }).filter(Boolean);
-    if (!lines.length) {
-        return '语音网关的角色表还没有读到。开口的人按剧情写出全名，不要只写姓、称呼或代词。同一个人全篇只用这一个名字。';
-    }
-    return `语音网关里已有这些角色。表里的人必须用列出的显示名，不要改成别名、昵称或代词：\n${lines.join('\n')}\n没有出现在这张表里的人，按剧情写出全名，不要只写姓、职位或「他」「她」。同一个人全篇只用这一个名字。`;
+    if (!lines.length) return '（角色表还没有读到。）';
+    return lines.map((line) => `- ${line}`).join('\n');
 }
 
 function rosterSignature(list) {
@@ -227,26 +225,60 @@ function watchGatewayCharacters() {
 
 function dialoguePrompt() {
     return `[对白语音标记]
-角色真正说出口的每一句都要打上语音标记，否则无法朗读。旁白、动作、心理活动保持普通正文，不要放进标记。
 
-整句只有一种情绪时，标记和这句对白在同一行：
+所有角色真正说出口的对白都必须添加语音标记。旁白、动作、环境、心理活动保持普通正文，不添加标记。不要为了加标记而改剧情、对白或性格。
+
+对白是角色说出口的话。旁白是动作、神态、环境和心理。情绪是这句话的情感。语气是怎么发声，例如轻声、缓慢、犹豫。情绪和语气必须分开写。
+
+已注册角色，标记里必须用显示名：
+${characterRosterText()}
+1. 表里的人用显示名，不要用别名、昵称、简称或代词当标记里的名字。
+2. 不在表里的人，按剧情写全名。不要只写姓、职位、称号或「他」「她」。
+3. 同一个人全文只用这一个名字。旁白里可以自然用代词。
+4. 角色名不能省略。逗号必须是英文逗号。
+
+只有一种情绪时：
 [角色名, 情绪] “对白内容”
 
-分段少用。只有这一句里情绪换了，才不要写引号，标记里也不要写情绪。对白只放在导演块的 text 里，按说话顺序分段：
-[甘雨] 〖vd:{"segments":[{"text":"诶？你怎么突然回来了……","emotion":"惊讶","pause_after_ms":200},{"text":"我、我只是刚好在这里休息而已。","emotion":"害羞"}]}〗
-不要在这个格式外面再写一遍对白或引号。整句只有一种情绪时不要写 segments。
-
-规则：
-1. ${characterRosterText()}
-2. 情绪只能从这些词里选：${promptEmotionNames().join('、')}。听不出明显情绪时，标记里写 default，不要另造词。
-3. 只有一种情绪时，标记后面同一行只写这一句口头对白，用 “” 包住。旁白另起一行，写在标记外面。
-4. 语气不是情绪。需要放轻、放慢或换一种口气时，写在右引号前面：〖vd:{"delivery":{"intensity":"whisper","pace":"slow"}}〗。intensity 只能是 normal、gentle、soft、whisper、firm、cold、teasing、hesitant、excited、crying、laughing。pace 只能是 fast、normal、gentle、slow。分段和语气可以写在同一个导演块里。写错会被忽略，对白照常朗读。
-
-示例：
-她把目光挪开。
 [甘雨, 害羞] “你、你怎么突然说这种话……”
 [甘雨, default] “今天的工作终于结束了。”
-[甘雨] 〖vd:{"segments":[{"text":"诶？你怎么突然回来了……","emotion":"惊讶","pause_after_ms":200},{"text":"我、我只是刚好在这里休息而已。","emotion":"害羞"}]}〗`.trim();
+
+每句对白单独一行，标记和对白在同一行。引号用中文双引号，里面只能是说出口的话。不要把动作、心理或旁白放进引号，也不要接在标记后面。不要把多句独立对白并成一条标记。
+
+同一句里情绪变了，整句只放进 segments，标记里不写情绪，外面不要再写对白或引号，也不要把旁白放进 segments：
+[角色名] 〖vd:{"segments":[{"text":"第一段对白","emotion":"情绪","pause_after_ms":200},{"text":"第二段对白","emotion":"情绪"}]}〗
+
+[甘雨] 〖vd:{"segments":[{"text":"诶？你怎么突然回来了……","emotion":"惊讶","pause_after_ms":200},{"text":"我、我只是刚好在这里休息而已。","emotion":"害羞"}]}〗
+
+segments 按说话顺序，每段是一段连续对白，并各自写 emotion。只有情绪真的变了才分段。拿不准就保持整句，用普通格式。
+
+情绪只能从这些词里选，不要自造、缩写或改写：${promptEmotionNames().join('、')}。
+default：没有明显情绪，正常说话。听不出情绪时用它，不要为了表现丰富而硬加情绪。
+平静：有意识地保持平稳、克制。
+日常：普通生活交流。
+自然：轻松，不刻意表现情绪。
+
+语气不是情绪。需要时才写 delivery，放在右引号前面：
+[角色名, 情绪] “对白内容〖vd:{"delivery":{"intensity":"whisper","pace":"slow"}}〗”
+intensity 是发声方式，不是音量数字。只能是 normal、gentle、soft、whisper、firm、cold、teasing、hesitant、excited、crying、laughing。
+pace 只能是 fast、normal、gentle、slow。
+没有特殊语气就不要写 delivery。不要把害羞、生气写进 intensity，也不要把 whisper、slow 写进 emotion。不要自造取值。
+
+整句换情绪，又要统一语气时，delivery 写在导演块根上，作为整句默认。某一段要盖过它，才在那个 segment 里再写 delivery：
+[甘雨] 〖vd:{"delivery":{"intensity":"soft","pace":"slow"},"segments":[{"text":"诶？你怎么突然回来了……","emotion":"惊讶","pause_after_ms":200},{"text":"我、我只是刚好在这里休息而已。","emotion":"害羞"}]}〗
+[甘雨] 〖vd:{"segments":[{"text":"我真的没有生气。","emotion":"不满"},{"text":"只是……你下次不要这样突然离开。","emotion":"委屈","delivery":{"intensity":"hesitant","pace":"slow"}}]}〗
+同一层不要写两个 delivery。
+
+pause_after_ms 是这一段说完后的停顿，只在确实需要时写。短暂停顿 100–250，语气转折 250–450，明显停顿 450–800。不要每段都加，不要写负数或超过 800。最后一段通常不写。
+
+JSON 使用双引号，不要尾随逗号。不要输出格式说明，不要用代码块包对白，正文里不要提到标记或导演块。
+
+她把目光挪开，手指不自觉地整理了一下衣袖。
+[甘雨, 害羞] “你、你怎么突然说这种话……”
+她稍微停顿了一下，随后恢复了平日的语气。
+[甘雨, default] “今天的工作终于结束了。”
+甘雨轻轻点头，声音也放柔了些。
+[甘雨, 温柔] “嗯，那我们走吧。”`.trim();
 }
 
 function promptRole(role) {
