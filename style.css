@@ -104,8 +104,11 @@
 }
 
 .tad-line-name {
-    color: var(--SmartThemeQuoteColor, #e18a24);
     font-weight: 600;
+}
+
+.tad-line-body {
+    color: var(--SmartThemeQuoteColor, #e18a24);
 }
 
 .tad-line-mark {
