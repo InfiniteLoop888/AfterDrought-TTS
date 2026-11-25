@@ -241,7 +241,7 @@ ${characterRosterText()}
 [角色名, 情绪] “对白内容”
 
 [甘雨, 害羞] “你、你怎么突然说这种话……”
-[甘雨, default] “今天的工作终于结束了。”
+[甘雨, 平静] “今天的工作终于结束了。”
 
 标记紧贴这句对白。对白可以单独成行，也可以和旁白写在同一段里，不必为了标记换行。引号用中文双引号，里面只能是说出口的话。不要把动作、心理或旁白放进引号，也不要接在标记后面。不要把多句独立对白并成一条标记。
 
@@ -252,8 +252,7 @@ ${characterRosterText()}
 
 segments 按说话顺序，每段是一段连续对白，并各自写 emotion。只有情绪真的变了才分段。拿不准就保持整句，用普通格式。
 
-情绪只能从这些词里选，不要自造、缩写或改写：${promptEmotionNames().join('、')}。
-default：没有明显情绪，正常说话。听不出情绪时用它，不要为了表现丰富而硬加情绪。
+情绪只能从这些词里选，不要自造、缩写或改写：${promptEmotionNames().join('、')}。听不出明显情绪时用平静，不要为了表现丰富而硬加情绪。
 平静：有意识地保持平稳、克制。
 日常：普通生活交流。
 自然：轻松，不刻意表现情绪。
@@ -276,7 +275,7 @@ JSON 使用双引号，不要尾随逗号。不要输出格式说明，不要用
 她把目光挪开，手指不自觉地整理了一下衣袖。
 [甘雨, 害羞] “你、你怎么突然说这种话……”
 她稍微停顿了一下，随后恢复了平日的语气。
-[甘雨, default] “今天的工作终于结束了。”
+[甘雨, 平静] “今天的工作终于结束了。”
 甘雨轻轻点头，声音也放柔了些。
 [甘雨, 温柔] “嗯，那我们走吧。”
 
@@ -439,6 +438,10 @@ function buildBubbleHtml(speaker, emotion, text, settled = true, director = null
     const width = Math.min(220, 60 + Math.max(2, Math.ceil(text.length * 0.25)) * 10);
     const seconds = Math.max(2, Math.ceil(text.length * 0.25));
     return `<span class="voice-bubble tad-voice${state.loading}" style="width: ${width}px"${state.attrs}>${BARS_HTML}<span class="sovits-voice-duration">${seconds}&quot;</span></span>`;
+}
+
+function spokenColor(html) {
+    return `<span class="tad-spoken">${html}</span>`;
 }
 
 function presentDialogue(text) {
@@ -707,7 +710,7 @@ function renderDialogueHtml(html) {
             if (lineMode) {
                 result += buildVoiceHtml(speaker, segmentEmotion(segment.director), segment.text, segment.settled, segment.director);
             } else {
-                result += escapeHtmlAttr(presentDialogue(segment.text));
+                result += spokenColor(escapeHtmlAttr(presentDialogue(segment.text)));
                 if (!gatewayCharacters.length || speakerKnown(speaker)) {
                     result += ' ' + buildBubbleHtml(speaker, segmentEmotion(segment.director), segment.text, segment.settled, segment.director);
                 }
@@ -753,7 +756,7 @@ function renderDialogueHtml(html) {
                 .replace(/^(?:\s|&nbsp;)*/, '')
                 .replace(/^<q\b[^>]*>/i, '')
                 .replace(/<\/q\s*>$/i, '');
-            result += visible;
+            result += spokenColor(visible);
             if (!gatewayCharacters.length || speakerKnown(speaker)) {
                 result += ' ' + buildBubbleHtml(speaker, emotion || 'default', display, spoken.settled, directed.director);
             }

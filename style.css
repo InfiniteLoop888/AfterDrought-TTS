@@ -107,7 +107,9 @@
     font-weight: 600;
 }
 
-.tad-line-body {
+.tad-line-body,
+.tad-spoken,
+.tad-kept {
     color: var(--SmartThemeQuoteColor, #e18a24);
 }
 
