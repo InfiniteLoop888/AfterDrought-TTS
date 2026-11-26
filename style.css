@@ -1,6 +1,7 @@
+/* 层高要压过酒馆自己的上限：#options 和 #extensionsMenu 是 29999。 */
 #tad-bubble-menu {
     position: fixed;
-    z-index: 20002;
+    z-index: 100001;
     display: flex;
     flex-direction: column;
     min-width: 120px;
@@ -168,7 +169,7 @@
     position: fixed;
     top: 12px;
     right: 108px;
-    z-index: 20000;
+    z-index: 100000;
     padding: 6px 12px;
     border: 1px solid color-mix(in srgb, var(--SmartThemeQuoteColor, #9bb6ff) 70%, #fff);
     border-radius: 999px;
@@ -193,7 +194,7 @@
 #tad-overlay {
     position: fixed;
     inset: 0;
-    z-index: 20001;
+    z-index: 100002;
     display: flex;
     box-sizing: border-box;
     overflow-y: auto;
@@ -655,7 +656,10 @@
         font-size: 16px;
     }
 
+    /* 手机上挪到顶栏下面：层高比酒馆顶栏高，压在顶栏上会挡住那边的按钮。 */
     #tad-fab {
+        top: calc(env(safe-area-inset-top, 0px) + var(--topBarBlockSize, 44px) + 8px);
+        right: max(12px, env(safe-area-inset-right, 0px));
         padding: 8px 14px;
         font-size: 14px;
     }
