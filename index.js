@@ -9,6 +9,7 @@ const STORAGE = {
     render: 'tad_render',
     settings: 'tad_settings',
     fab: 'tad_fab',
+    fabShow: 'tad_fab_show',
 };
 
 const PROMPT_KEY = 'tts-afterdrought-dialogue';
@@ -65,6 +66,16 @@ function apiHeaders(extra) {
 
 function enabled() {
     return localStorage.getItem(STORAGE.enabled) !== '0';
+}
+
+function fabEnabled() {
+    return localStorage.getItem(STORAGE.fabShow) !== '0';
+}
+
+// 悬浮窗只是入口，关掉之后设置还能从酒馆的扩展面板打开。
+function applyFabVisibility() {
+    const fab = document.querySelector('#tad-fab');
+    if (fab) fab.hidden = !fabEnabled();
 }
 
 function autoPlay() {
@@ -229,6 +240,7 @@ async function loadGatewayCharacters() {
 
 function watchGatewayCharacters() {
     const pull = () => {
+        if (!enabled()) return;
         if (document.visibilityState !== 'hidden') loadGatewayCharacters();
     };
     setInterval(pull, 3000);
@@ -314,7 +326,8 @@ function activePrompt() {
 
 function applyDialoguePrompt() {
     const prompt = loadSettings().prompt;
-    const text = prompt.enabled === false ? '' : activePrompt();
+    const on = enabled() && prompt.enabled !== false;
+    const text = on ? activePrompt() : '';
     const depth = Math.max(0, Number(prompt.depth) || 0);
     setExtensionPrompt(
         PROMPT_KEY,
@@ -323,7 +336,7 @@ function applyDialoguePrompt() {
         depth,
         false,
         promptRole(prompt.role),
-        () => speakableGeneration,
+        () => speakableGeneration && enabled(),
     );
 }
 
@@ -1369,7 +1382,7 @@ function fullSegments(text, speaker) {
 }
 
 function queueMessage(mes, autoplay, full = false) {
-    if (!mes || mes.getAttribute('is_user') === 'true') return;
+    if (!enabled() || !mes || mes.getAttribute('is_user') === 'true') return;
     stopPlayback();
     const id = Number(mes.getAttribute('mesid'));
     const entry = chatContext()?.chat?.[id];
@@ -1394,9 +1407,10 @@ function queueLastMessage(autoplay) {
 }
 
 function mountFullButtons() {
+    const active = enabled() && fullScope();
     document.querySelectorAll('#chat .mes').forEach((mes) => {
         const existing = mes.querySelector('.tad-full-play');
-        if (!fullScope() || mes.getAttribute('is_user') === 'true') {
+        if (!active || mes.getAttribute('is_user') === 'true') {
             existing?.remove();
             return;
         }
@@ -1422,6 +1436,7 @@ function mountFullButtons() {
 }
 
 function scheduleLast(autoplay) {
+    if (!enabled()) return;
     const last = lastMesText();
     if (!last) return;
     last.querySelectorAll(VOICE_NODE).forEach((btn) => {
@@ -1628,7 +1643,7 @@ function refreshRenderedMessages() {
 }
 
 function scheduleScan() {
-    if (refreshing) return;
+    if (refreshing || !enabled()) return;
     clearTimeout(scanTimer);
     scanTimer = setTimeout(() => scan(), 0);
 }
@@ -1645,6 +1660,7 @@ function paintControls() {
     setValue('api', apiBase());
     setValue('token', localStorage.getItem(STORAGE.token) || '');
     setValue('enabled', enabled());
+    setValue('fab', fabEnabled());
     setValue('auto', autoPlay());
     setValue('render', renderMode());
     setValue('prompt-enabled', settings.prompt.enabled !== false);
@@ -1679,6 +1695,7 @@ function commitSettings(patch) {
     if (patch.api !== undefined) localStorage.setItem(STORAGE.api, patch.api.trim() || DEFAULT_API);
     if (patch.token !== undefined) localStorage.setItem(STORAGE.token, patch.token.trim());
     if (patch.enabled !== undefined) localStorage.setItem(STORAGE.enabled, patch.enabled ? '1' : '0');
+    if (patch.fab !== undefined) localStorage.setItem(STORAGE.fabShow, patch.fab ? '1' : '0');
     if (patch.auto !== undefined) localStorage.setItem(STORAGE.auto, patch.auto ? '1' : '0');
     if (patch.render !== undefined) localStorage.setItem(STORAGE.render, patch.render === 'line' ? 'line' : 'bubble');
     if (patch.prompt) {
@@ -1701,10 +1718,21 @@ function commitSettings(patch) {
         refreshView = true;
     }
     if (patch.prompt || patch.playback || patch.notify || patch.regexFilters) saveSettings(settings);
+    if (patch.fab !== undefined) applyFabVisibility();
     applyDialoguePrompt();
     if (patch.enabled === false || patch.render !== undefined || refreshView) stopPlayback();
-    if (patch.enabled === true && !skipRewrite()) scan();
-    else if (patch.playback) mountFullButtons();
+    if (patch.enabled === false) {
+        // 关掉总开关就不再改写正文，消息上的喇叭也一起收回去。
+        refreshRenderedMessages();
+        mountFullButtons();
+    } else if (patch.enabled === true) {
+        loadGatewayCharacters();
+        loadEmotionNames();
+        if (!skipRewrite()) scan();
+        else mountFullButtons();
+    } else if (patch.playback) {
+        mountFullButtons();
+    }
     paintControls();
     if (patch.regexFilters) renderRegexLists();
     if (patch.render !== undefined || refreshView) refreshRenderedMessages();
@@ -2089,6 +2117,7 @@ function playbackModule() {
     switches.className = 'tad-switches';
     switches.append(
         switchRow('启用', 'enabled'),
+        switchRow('悬浮窗', 'fab'),
         switchRow('新回复自动朗读', 'auto'),
         switchRow('回复后自动合成', 'auto-infer'),
         switchRow('边生成边播放', 'progressive'),
@@ -2108,12 +2137,13 @@ function playbackModule() {
     bufferLabel.append(buffer);
     const note = document.createElement('div');
     note.className = 'tad-hint';
-    note.textContent = '全文同样渲染对白，朗读时按整条消息逐句读，用消息上的喇叭重听。前端卡兼容不改写正文。自动合成只生成，自动朗读会按缓冲句数开播。';
+    note.textContent = '关掉「启用」后不再改写正文、不注入提示词，也不再合成语音。关掉「悬浮窗」只是收起页面上的 TTS 按钮，设置仍能从酒馆的扩展面板打开。全文同样渲染对白，朗读时按整条消息逐句读，用消息上的喇叭重听。前端卡兼容不改写正文。自动合成只生成，自动朗读会按缓冲句数开播。';
     switches.addEventListener('change', (event) => {
         const input = event.target;
         if (!(input instanceof HTMLInputElement)) return;
         const map = {
             enabled: () => commitSettings({ enabled: input.checked }),
+            fab: () => commitSettings({ fab: input.checked }),
             auto: () => commitSettings({ auto: input.checked }),
             'auto-infer': () => commitSettings({ playback: { autoInfer: input.checked } }),
             progressive: () => commitSettings({ playback: { progressive: input.checked } }),
@@ -2263,6 +2293,7 @@ function openSheet() {
     const overlay = document.querySelector('#tad-overlay');
     if (!overlay) return;
     overlay.hidden = false;
+    overlay.querySelector('.tad-sheet-body')?.scrollTo?.({ top: 0 });
     refreshStatus();
     refreshCacheCount();
     renderRegexLists();
@@ -2368,6 +2399,7 @@ function buildShell() {
     });
 
     document.body.append(fab, overlay);
+    applyFabVisibility();
     refreshStatus();
 }
 
@@ -2409,8 +2441,10 @@ function init() {
         localStorage.setItem(STORAGE.api, DEFAULT_API);
     }
     applyDialoguePrompt();
-    loadEmotionNames();
-    loadGatewayCharacters();
+    if (enabled()) {
+        loadEmotionNames();
+        loadGatewayCharacters();
+    }
     watchGatewayCharacters();
     restoreFolder();
     refreshCacheCount();
@@ -2427,7 +2461,8 @@ function init() {
     if (event_types.GENERATION_ENDED) {
         eventSource.on(event_types.GENERATION_ENDED, () => {
             streaming = false;
-            speakableGeneration = true;
+            speakableGeneration = enabled();
+            if (!enabled()) return;
             const autoplay = autoPlay();
             if (compatMode()) {
                 if (autoplay || playbackSettings().autoInfer) queueLastMessage(autoplay);
@@ -2448,8 +2483,8 @@ function init() {
     if (event_types.GENERATION_STARTED) {
         eventSource.on(event_types.GENERATION_STARTED, async (type) => {
             streaming = type !== 'quiet';
-            speakableGeneration = type !== 'quiet';
-            await loadGatewayCharacters();
+            speakableGeneration = enabled() && type !== 'quiet';
+            if (enabled()) await loadGatewayCharacters();
             applyDialoguePrompt();
         });
     }
