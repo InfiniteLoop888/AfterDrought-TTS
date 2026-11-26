@@ -2324,10 +2324,16 @@ function regexModule() {
     return box;
 }
 
+// 触摸抬起后浏览器还会补发一次 click。面板现在是半屏高，悬浮窗那一下正好落在
+// 露出来的遮罩上，于是刚打开就被这声 click 关掉。开面板后的短时间先不理遮罩点击。
+const SHEET_OPEN_GUARD_MS = 400;
+let sheetOpenedAt = 0;
+
 function openSheet() {
     const overlay = document.querySelector('#tad-overlay');
     if (!overlay) return;
     overlay.hidden = false;
+    sheetOpenedAt = performance.now();
     overlay.querySelector('.tad-sheet-body')?.scrollTo?.({ top: 0 });
     refreshStatus();
     refreshCacheCount();
@@ -2338,6 +2344,11 @@ function openSheet() {
 function closeSheet() {
     const overlay = document.querySelector('#tad-overlay');
     if (overlay) overlay.hidden = true;
+}
+
+function closeSheetFromBackdrop() {
+    if (performance.now() - sheetOpenedAt < SHEET_OPEN_GUARD_MS) return;
+    closeSheet();
 }
 
 function bindFab(fab) {
@@ -2428,7 +2439,7 @@ function buildShell() {
     appendSettingsFields(body);
     sheet.append(header, body);
     overlay.append(sheet);
-    overlay.addEventListener('click', closeSheet);
+    overlay.addEventListener('click', closeSheetFromBackdrop);
     document.addEventListener('keydown', (event) => {
         if (event.key === 'Escape') closeSheet();
     });
