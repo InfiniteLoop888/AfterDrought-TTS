@@ -1971,7 +1971,7 @@ async function refreshStatus() {
     });
 }
 
-function appendSettingsFields(parent) {
+function connectionBox() {
     const status = document.createElement('div');
     status.className = 'tad-status';
     status.dataset.tad = 'status';
@@ -2016,7 +2016,10 @@ function appendSettingsFields(parent) {
     const booth = document.createElement('div');
     booth.className = 'tad-booth';
     booth.append(status, apiLabel, tokenLabel, check, hint);
+    return booth;
+}
 
+function appendSettingsFields(parent) {
     const desk = document.createElement('div');
     desk.className = 'tad-desk';
     const index = document.createElement('div');
@@ -2046,32 +2049,34 @@ function appendSettingsFields(parent) {
     });
     const panels = document.createElement('div');
     panels.className = 'tad-panels';
-    panels.append(playbackModule(), promptModule(), notifyModule(), cacheModule(), regexModule());
+    panels.append(mainModule(), playbackModule(), promptModule(), notifyModule(), cacheModule(), regexModule());
     desk.append(index, panels);
 
-    parent.append(booth, desk);
+    parent.append(desk);
     paintControls();
     renderRegexLists(parent);
-    showSettingsTab(settingsTab);
+    // 这时 parent 还没挂进文档，全局查询找不到这批节点，先按 parent 单独落页签。
+    showSettingsTab(settingsTab, parent);
 }
 
 const SETTINGS_TABS = [
+    ['main', '主要设置'],
     ['play', '播放'],
     ['prompt', '提示词'],
     ['notify', '通知'],
     ['cache', '缓存'],
     ['filter', '过滤'],
 ];
-let settingsTab = 'play';
+let settingsTab = 'main';
 
-function showSettingsTab(tab) {
-    settingsTab = SETTINGS_TABS.some(([id]) => id === tab) ? tab : 'play';
-    document.querySelectorAll('[data-tad-tab]').forEach((node) => {
+function showSettingsTab(tab, root = document) {
+    settingsTab = SETTINGS_TABS.some(([id]) => id === tab) ? tab : 'main';
+    root.querySelectorAll('[data-tad-tab]').forEach((node) => {
         const on = node.dataset.tadTab === settingsTab;
         node.classList.toggle('is-on', on);
         node.setAttribute('aria-selected', on ? 'true' : 'false');
     });
-    document.querySelectorAll('[data-tad-panel]').forEach((node) => {
+    root.querySelectorAll('[data-tad-panel]').forEach((node) => {
         node.classList.toggle('is-on', node.dataset.tadPanel === settingsTab);
     });
 }
@@ -2116,8 +2121,8 @@ function selectField(label, name, options) {
     return field;
 }
 
-function playbackModule() {
-    const box = moduleBox('播放与自动化', 'play');
+function mainModule() {
+    const box = moduleBox('连接与总开关', 'main');
     const switches = document.createElement('div');
     switches.className = 'tad-switches';
     const inferRow = switchRow('回复后自动合成', 'auto-infer');
@@ -2130,11 +2135,37 @@ function playbackModule() {
         switchRow('悬浮窗', 'fab'),
         switchRow('新回复自动朗读', 'auto'),
         inferRow,
-        switchRow('边生成边播放', 'progressive'),
-        switchRow('前端卡兼容', 'compat'),
     );
     const render = selectField('渲染', 'render', [['bubble', '气泡'], ['line', '台词']]);
     const scope = selectField('朗读范围', 'scope', [['dialogue', '对白'], ['full', '全文']]);
+    const note = document.createElement('div');
+    note.className = 'tad-hint';
+    note.textContent = '关掉「启用」后不再改写正文、不注入提示词，也不再合成语音。关掉「悬浮窗」只是收起页面上的 TTS 按钮，设置仍能从酒馆的扩展面板打开。全文同样渲染对白，朗读时按整条消息逐句读，用消息上的喇叭重听。「回复后自动合成」对「对白」范围无效，只在前端卡兼容或全文范围下起作用。';
+    switches.addEventListener('change', (event) => {
+        const input = event.target;
+        if (!(input instanceof HTMLInputElement)) return;
+        const map = {
+            enabled: () => commitSettings({ enabled: input.checked }),
+            fab: () => commitSettings({ fab: input.checked }),
+            auto: () => commitSettings({ auto: input.checked }),
+            'auto-infer': () => commitSettings({ playback: { autoInfer: input.checked } }),
+        };
+        map[input.dataset.tad]?.();
+    });
+    render.querySelector('select').addEventListener('change', (event) => commitSettings({ render: event.target.value }));
+    scope.querySelector('select').addEventListener('change', (event) => commitSettings({ playback: { scope: event.target.value } }));
+    box.append(connectionBox(), switches, render, scope, note);
+    return box;
+}
+
+function playbackModule() {
+    const box = moduleBox('播放与自动化', 'play');
+    const switches = document.createElement('div');
+    switches.className = 'tad-switches';
+    switches.append(
+        switchRow('边生成边播放', 'progressive'),
+        switchRow('前端卡兼容', 'compat'),
+    );
     const bufferLabel = document.createElement('label');
     bufferLabel.className = 'tad-field';
     bufferLabel.append(document.createTextNode('起播缓冲句数'));
@@ -2147,24 +2178,18 @@ function playbackModule() {
     bufferLabel.append(buffer);
     const note = document.createElement('div');
     note.className = 'tad-hint';
-    note.textContent = '关掉「启用」后不再改写正文、不注入提示词，也不再合成语音。关掉「悬浮窗」只是收起页面上的 TTS 按钮，设置仍能从酒馆的扩展面板打开。全文同样渲染对白，朗读时按整条消息逐句读，用消息上的喇叭重听。前端卡兼容不改写正文。自动合成只生成，自动朗读会按缓冲句数开播。「回复后自动合成」对「对白」范围无效，只在前端卡兼容或全文范围下起作用。';
+    note.textContent = '「边生成边播放」攒到缓冲句数就开播，缓冲越小起播越快、越容易断。前端卡兼容不改写正文，只在前端卡上按整条消息读。';
     switches.addEventListener('change', (event) => {
         const input = event.target;
         if (!(input instanceof HTMLInputElement)) return;
         const map = {
-            enabled: () => commitSettings({ enabled: input.checked }),
-            fab: () => commitSettings({ fab: input.checked }),
-            auto: () => commitSettings({ auto: input.checked }),
-            'auto-infer': () => commitSettings({ playback: { autoInfer: input.checked } }),
             progressive: () => commitSettings({ playback: { progressive: input.checked } }),
             compat: () => commitSettings({ playback: { compat: input.checked } }),
         };
         map[input.dataset.tad]?.();
     });
-    render.querySelector('select').addEventListener('change', (event) => commitSettings({ render: event.target.value }));
-    scope.querySelector('select').addEventListener('change', (event) => commitSettings({ playback: { scope: event.target.value } }));
     buffer.addEventListener('change', () => commitSettings({ playback: { bufferSize: Number(buffer.value) || 5 } }));
-    box.append(switches, render, scope, bufferLabel, note);
+    box.append(switches, bufferLabel, note);
     return box;
 }
 
