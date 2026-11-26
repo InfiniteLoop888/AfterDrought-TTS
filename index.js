@@ -1679,6 +1679,11 @@ function paintControls() {
     document.querySelectorAll('[data-tad="buffer"]').forEach((node) => {
         node.disabled = settings.playback.progressive !== true;
     });
+    document.querySelectorAll('[data-tad="auto-infer-note"]').forEach((node) => {
+        // 对白范围本来就会自动合成，这个开关只在全文和兼容模式下起作用。
+        const useful = settings.playback.scope === 'full' || settings.playback.compat === true;
+        node.textContent = useful ? '' : '（对「对白」无效）';
+    });
     document.querySelectorAll('[data-tad="prompt-state"]').forEach((node) => {
         node.textContent = settings.prompt.builtin === false
             ? '正在使用你改过的提示词。{{CHAR}} 会换成当前角色名，{{CHARACTERS}} 会换成网关角色表，{{EMOTIONS}} 会换成情绪列表。'
@@ -2115,11 +2120,16 @@ function playbackModule() {
     const box = moduleBox('播放与自动化', 'play');
     const switches = document.createElement('div');
     switches.className = 'tad-switches';
+    const inferRow = switchRow('回复后自动合成', 'auto-infer');
+    const inferNote = document.createElement('span');
+    inferNote.className = 'tad-switch-note';
+    inferNote.dataset.tad = 'auto-infer-note';
+    inferRow.querySelector('span').append(inferNote);
     switches.append(
         switchRow('启用', 'enabled'),
         switchRow('悬浮窗', 'fab'),
         switchRow('新回复自动朗读', 'auto'),
-        switchRow('回复后自动合成', 'auto-infer'),
+        inferRow,
         switchRow('边生成边播放', 'progressive'),
         switchRow('前端卡兼容', 'compat'),
     );
@@ -2137,7 +2147,7 @@ function playbackModule() {
     bufferLabel.append(buffer);
     const note = document.createElement('div');
     note.className = 'tad-hint';
-    note.textContent = '关掉「启用」后不再改写正文、不注入提示词，也不再合成语音。关掉「悬浮窗」只是收起页面上的 TTS 按钮，设置仍能从酒馆的扩展面板打开。全文同样渲染对白，朗读时按整条消息逐句读，用消息上的喇叭重听。前端卡兼容不改写正文。自动合成只生成，自动朗读会按缓冲句数开播。';
+    note.textContent = '关掉「启用」后不再改写正文、不注入提示词，也不再合成语音。关掉「悬浮窗」只是收起页面上的 TTS 按钮，设置仍能从酒馆的扩展面板打开。全文同样渲染对白，朗读时按整条消息逐句读，用消息上的喇叭重听。前端卡兼容不改写正文。自动合成只生成，自动朗读会按缓冲句数开播。「回复后自动合成」对「对白」范围无效，只在前端卡兼容或全文范围下起作用。';
     switches.addEventListener('change', (event) => {
         const input = event.target;
         if (!(input instanceof HTMLInputElement)) return;

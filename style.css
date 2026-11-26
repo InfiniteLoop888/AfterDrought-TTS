@@ -432,6 +432,12 @@
     border-top: 1px solid color-mix(in srgb, currentColor 10%, transparent);
 }
 
+.tad-switch-note {
+    margin-left: 6px;
+    font-size: 12px;
+    opacity: 0.6;
+}
+
 #tad-sheet .tad-switch input,
 #tad-settings .tad-switch input {
     appearance: none;
