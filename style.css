@@ -216,8 +216,9 @@
 
 #tad-sheet {
     width: min(680px, 100%);
-    max-height: min(86vh, 760px);
-    max-height: min(86dvh, 760px);
+    /* 固定高度，切页签时面板不再跟着内容伸缩；内容多了在面板里滚。 */
+    height: min(86vh, 760px);
+    height: min(86dvh, 760px);
     /* 用自动外边距居中，面板比屏幕高时顶部仍然能滚到。 */
     margin: auto;
     display: flex;
@@ -601,9 +602,9 @@
 
     #tad-sheet {
         width: 100%;
-        /* 手机上只占半屏，聊天内容还能露出来。 */
-        max-height: calc(50vh - 8px);
-        max-height: calc(50dvh - 8px);
+        /* 手机上占七成半屏，露出的聊天内容还够看，内容在面板里滚。 */
+        height: calc(75vh - 8px);
+        height: calc(75dvh - 8px);
         border-radius: 14px;
     }
 
