@@ -191,9 +191,15 @@
     filter: brightness(1.08);
 }
 
+/* 酒馆给 html 加了 translateZ(0)，fixed 的包含块变成高度为 0 的 html，
+   用 inset/bottom 撑不开，只能拿视口单位显式给高。 */
 #tad-overlay {
     position: fixed;
-    inset: 0;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 100vh;
+    height: 100dvh;
     z-index: 100002;
     display: flex;
     box-sizing: border-box;
