@@ -175,10 +175,6 @@ function resetSettingsCache() {
     settingsCache = null;
 }
 
-function injectEnabled() {
-    return loadSettings().prompt.enabled !== false;
-}
-
 function playbackSettings() {
     return loadSettings().playback;
 }
@@ -893,17 +889,33 @@ function lineVoiceHtml(line) {
 
 // <tts> 不是标准标签，酒馆格式化正文时会把它剥掉，DOM 里只剩「角色|情绪|文本」这串裸文字。
 // 所以带标签的楼层从原始消息重画：先换成标记，过一遍酒馆的格式化，再把标记换回语音控件。
+// 重画失败的两种原因只报一次：正文停在剥完标签的样子最难看出问题出在哪。
+let warnedRenderGap = false;
+function warnRenderGap(reason) {
+    if (warnedRenderGap) return;
+    warnedRenderGap = true;
+    console.warn(`[tts-afterdrought] 带 <tts> 的楼层没能重画：${reason}`);
+}
+
 function rawTtsHtml(raw, entry, id) {
     // 边生成边显示时，还没闭合的标签先整段砍掉，译文已经写在前面，读者照样能看。
-    const text = replyStreaming() ? raw.replace(/<(?:i-)?tts>(?:(?!<\/(?:i-)?tts>)[\s\S])*$/i, '') : raw;
-    const marked = markSpeech(text, replyStreaming());
-    if (!marked) return null;
+    const streaming = replyStreaming();
+    const text = streaming ? raw.replace(/<(?:i-)?tts>(?:(?!<\/(?:i-)?tts>)[\s\S])*$/i, '') : raw;
+    const marked = markSpeech(text, streaming);
+    if (!marked) {
+        if (!streaming) warnRenderGap(`按当前台词格式（${voiceFormat()}）一句都没匹配上，模型写的是另一种写法`);
+        return null;
+    }
     const ctx = chatContext();
-    if (!ctx || typeof ctx.messageFormatting !== 'function') return null;
+    if (!ctx || typeof ctx.messageFormatting !== 'function') {
+        warnRenderGap('拿不到 SillyTavern 的 messageFormatting');
+        return null;
+    }
     let formatted;
     try {
         formatted = ctx.messageFormatting(marked.text, entry.name || '', !!entry.is_system, !!entry.is_user, id, {}, false);
-    } catch {
+    } catch (err) {
+        warnRenderGap(`messageFormatting 抛错：${err?.message || err}`);
         return null;
     }
     return waveMarks(String(formatted), marked.controls);
@@ -1497,6 +1509,17 @@ function enqueueSegment(segment) {
     pump();
 }
 
+// 跟随滚动：这句已经不在聊天框视口里时才滚一下，用户自己滚到别处时不硬拽回去。
+function revealNode(node) {
+    if (!node || !playbackSettings().follow) return;
+    const chat = document.getElementById('chat');
+    if (!chat) return;
+    const box = chat.getBoundingClientRect();
+    const rect = node.getBoundingClientRect();
+    if (rect.top >= box.top && rect.bottom <= box.bottom) return;
+    chat.scrollTop += rect.top - box.top - Math.max(0, (box.height - rect.height) / 2);
+}
+
 async function playBubble(btn) {
     const key = btn?.dataset.key;
     const url = btn?.dataset.audioUrl || memory.get(key);
@@ -1792,10 +1815,6 @@ function scheduleLast(autoplay) {
     pump();
 }
 
-// 记住每个气泡上次渲染出的 HTML。流式输出时 DOM 会不停变动，但内容没变时
-// 不该再整块重写一次，否则会打断选中、丢失焦点，还白跑一遍正则。
-const lastRenderedHtml = new WeakMap();
-
 // 楼层里有没有语音标签；换了自定义模板时按模板的开头标签判断，不再只认 <tts>。
 function looksLikeVoice(raw) {
     if (!raw) return false;
@@ -1804,6 +1823,18 @@ function looksLikeVoice(raw) {
     if (format.standard) return false;
     const tag = format.literals[0].match(/<[^<>]+>/);
     return Boolean(tag && raw.includes(tag[0]));
+}
+
+// 一次性自检：正文没被改写时，先看这几项，省得来回猜是开关、兼容模式还是酒馆接口拿不到。
+function logSelfCheck() {
+    const ctx = chatContext();
+    console.info('[tts-afterdrought] 自检', {
+        总开关: enabled(),
+        兼容模式: compatMode(),
+        台词格式: voiceFormat(),
+        聊天记录: Array.isArray(ctx?.chat) ? ctx.chat.length : '取不到',
+        重画正文: typeof ctx?.messageFormatting === 'function' ? '可以' : '取不到',
+    });
 }
 
 function scan() {
@@ -1820,8 +1851,9 @@ function scan() {
         const raw = typeof entry?.mes === 'string' ? entry.mes : '';
         if (!looksLikeVoice(raw)) return;
         const next = rawTtsHtml(raw, entry, mesid);
-        if (!next || lastRenderedHtml.get(node) === next) return;
-        lastRenderedHtml.set(node, next);
+        if (!next) return;
+        // 只认当前 DOM：酒馆自己重画过（刷新楼层、切 swipe）之后，气泡就没了，
+        // 这时再拿缓存跳过重画，正文会一直停在剥完标签的样子。
         if (next === node.innerHTML) return;
         node.innerHTML = next;
         changed = true;
@@ -2066,7 +2098,7 @@ function refreshRenderedMessages() {
                 try {
                     // 关掉扩展后不再改写正文，<tts> 标签要自己收干净，只留读者该看的那句。
                     // 收在格式化之前做：格式化会把未知标签连同标签里的文字一起剥掉，剥完就分不清哪句是台词了。
-                    const source = settings.enabled ? entry.mes : humanizeTtsTags(entry.mes);
+                    const source = enabled() ? entry.mes : humanizeTtsTags(entry.mes);
                     const html = ctx.messageFormatting(
                         source,
                         entry.name || '',
@@ -3115,6 +3147,7 @@ function init() {
     });
     const observer = new MutationObserver(scheduleScan);
     observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+    logSelfCheck();
     scan();
 
     if (event_types.GENERATION_ENDED) {

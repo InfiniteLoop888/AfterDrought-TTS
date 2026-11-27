@@ -147,7 +147,8 @@ export function formatProblem(format) {
         if (names.filter((name) => name === field).length !== 1) return `{${field}} 必须正好写一次`;
     }
     if (names.filter((name) => name === '译文').length > 1) return '{译文} 最多写一次';
-    if (literals.slice(0, -1).some((literal) => !literal.length)) return '占位符之间要有固定文字（比如 | 和 <tts>）';
+    // 首尾两段可以是空的（译文写在最前面、或者最后没有收尾文字），只要求占位符之间别空着。
+    if (literals.slice(1, -1).some((literal) => !literal.length)) return '占位符之间要有固定文字（比如 | 和 <tts>）';
     return '';
 }
 
