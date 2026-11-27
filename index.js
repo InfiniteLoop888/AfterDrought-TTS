@@ -921,6 +921,55 @@ function rawTtsHtml(raw, entry, id) {
     return waveMarks(String(formatted), marked.controls);
 }
 
+// 酒馆显示的是 extra.display_text（有的话），读原始正文时跟着取那一份，才算和页面上是同一段字。
+function rawOf(entry) {
+    const shown = entry?.extra?.display_text;
+    if (typeof shown === 'string' && shown) return shown;
+    return typeof entry?.mes === 'string' ? entry.mes : '';
+}
+
+// 上面这条路只在酒馆没有格式化钩子时才走。新版酒馆在正文渲染的每一步都留了钩子，
+// ST-iPhonie 用的就是它：标记插在酒馆自己那遍正则/Markdown 之前，控件在 Markdown 之后换回来。
+// 这样气泡是酒馆渲染结果的一部分；渲染完再去改 innerHTML，酒馆一重画楼层（刷新、切 swipe、
+// 滚回历史都算）就把控件冲掉，正文只剩下被剥掉标签的那串「角色|情绪|文本」。
+const hookControls = new Map();
+let formatterHooked = false;
+
+function hookApplies(meta) {
+    return enabled()
+        && Number(meta?.messageId) >= 0
+        && !meta?.isUser
+        && !meta?.isSystem
+        && !meta?.isReasoning;
+}
+
+/** 装上钩子；酒馆太老没有钩子时返回 false，让上面那条改 DOM 的路兜底。 */
+function installFormatterHooks() {
+    if (formatterHooked) return true;
+    const formatter = chatContext()?.messageFormatter;
+    if (typeof formatter?.addHook !== 'function') return false;
+    const stage = formatter.stage || {};
+    const before = stage.BEFORE_REGEX || 'BEFORE_REGEX';
+    const after = stage.AFTER_MARKDOWN || null;
+    formatter.addHook((text, meta) => {
+        if (typeof text !== 'string' || !hookApplies(meta) || !looksLikeVoice(text)) return text;
+        const marked = markSpeech(text, replyStreaming());
+        if (!marked) return text;
+        hookControls.set(Number(meta.messageId), marked.controls);
+        // 没有 Markdown 之后的阶段就把控件直接插在这里，标记等不到换回来的时机。
+        return after ? marked.text : waveMarks(marked.text, marked.controls);
+    }, { stage: before, order: 100 });
+    if (after) {
+        formatter.addHook((text, meta) => {
+            const controls = hookControls.get(Number(meta?.messageId));
+            if (typeof text !== 'string' || !controls || !hookApplies(meta)) return text;
+            return waveMarks(text, controls);
+        }, { stage: after, order: 100 });
+    }
+    formatterHooked = true;
+    return true;
+}
+
 // 缓存以前只进不出，用久了 IndexedDB 会一路涨到配额。按条数和总字节做 LRU 淘汰。
 const CACHE_MAX_ITEMS = 2000;
 const CACHE_MAX_BYTES = 400 * 1024 * 1024;
@@ -1833,13 +1882,18 @@ function logSelfCheck() {
         兼容模式: compatMode(),
         台词格式: voiceFormat(),
         聊天记录: Array.isArray(ctx?.chat) ? ctx.chat.length : '取不到',
-        重画正文: typeof ctx?.messageFormatting === 'function' ? '可以' : '取不到',
+        格式化钩子: formatterHooked ? '已接管' : (typeof ctx?.messageFormatter?.addHook === 'function' ? '可装' : '没有，走改 DOM'),
     });
 }
 
 function scan() {
     mountFullButtons();
     if (!enabled() || skipRewrite()) return;
+    // 钩子接手了正文，这里再改 DOM 只会跟酒馆的渲染抢同一个节点。
+    if (formatterHooked) {
+        if (!generating()) playNewReply = false;
+        return;
+    }
     let changed = false;
     const ctx = chatContext();
     const chat = Array.isArray(ctx?.chat) ? ctx.chat : null;
@@ -1848,7 +1902,7 @@ function scan() {
         // 带 <tts> 的楼层只能从原始消息重画，DOM 里的标签已经被酒馆剥掉了。
         const mesid = Number(node.closest('.mes')?.getAttribute('mesid'));
         const entry = chat && Number.isInteger(mesid) ? chat[mesid] : null;
-        const raw = typeof entry?.mes === 'string' ? entry.mes : '';
+        const raw = rawOf(entry);
         if (!looksLikeVoice(raw)) return;
         const next = rawTtsHtml(raw, entry, mesid);
         if (!next) return;
@@ -2095,10 +2149,12 @@ function refreshRenderedMessages() {
                 const entry = chat[id];
                 if (!text || text.tagName !== 'DIV' || text.querySelector('#curEditTextarea')) return;
                 if (!entry || typeof entry.mes !== 'string') return;
+                // 开着的时候只重画带语音标记的楼层：别的扩展往正文里挂的东西不该被整条重写掉。
+                if (enabled() && !looksLikeVoice(rawOf(entry))) return;
                 try {
                     // 关掉扩展后不再改写正文，<tts> 标签要自己收干净，只留读者该看的那句。
                     // 收在格式化之前做：格式化会把未知标签连同标签里的文字一起剥掉，剥完就分不清哪句是台词了。
-                    const source = enabled() ? entry.mes : humanizeTtsTags(entry.mes);
+                    const source = enabled() ? rawOf(entry) : humanizeTtsTags(rawOf(entry));
                     const html = ctx.messageFormatting(
                         source,
                         entry.name || '',
@@ -3115,6 +3171,8 @@ function init() {
     if ((localStorage.getItem(STORAGE.api) || '').replace(/\/+$/, '') === LEGACY_API) {
         localStorage.setItem(STORAGE.api, DEFAULT_API);
     }
+    // 正文渲染不能等界面搭完：搭界面哪一步抛错，后面的钩子就装上不去，读者只会看到剥了标签的正文。
+    installFormatterHooks();
     applyDialoguePrompt();
     if (enabled()) {
         loadEmotionNames();
@@ -3147,8 +3205,11 @@ function init() {
     });
     const observer = new MutationObserver(scheduleScan);
     observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+    // 钩子先装：装完让酒馆把已有楼层重画一遍，历史消息也能拿到气泡。
+    installFormatterHooks();
     logSelfCheck();
-    scan();
+    if (formatterHooked) refreshRenderedMessages();
+    else scan();
 
     if (event_types.GENERATION_ENDED) {
         eventSource.on(event_types.GENERATION_ENDED, () => {
@@ -3184,6 +3245,7 @@ function init() {
         eventSource.on(event_types.CHAT_CHANGED, () => {
             streaming = false;
             stopPlayback();
+            hookControls.clear();
             applyDialoguePrompt();
             scheduleScan();
         });
