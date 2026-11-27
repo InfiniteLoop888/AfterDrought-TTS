@@ -533,6 +533,27 @@
     line-height: 1.5;
 }
 
+/* 兼容模式开着时在「主要设置」页面的提醒：这一条得看得见，不能和普通小字一样淡。 */
+.tad-compat-note {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    border: 1px solid color-mix(in srgb, var(--SmartThemeQuoteColor, #e18a24) 45%, transparent);
+    background: color-mix(in srgb, var(--SmartThemeQuoteColor, #e18a24) 12%, transparent);
+    opacity: 1;
+}
+
+.tad-compat-note[hidden] {
+    display: none;
+}
+
+.tad-compat-note .tad-check {
+    flex: none;
+}
+
 .tad-status-ok {
     color: #7dcea0;
     opacity: 1;

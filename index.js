@@ -183,6 +183,15 @@ function compatMode() {
     return playbackSettings().compat === true;
 }
 
+// 兼容模式只由开关写入，状态存在 localStorage，刷新、关总开关都不会重置。
+// 所以报「开着」的时候得说清是几时打开的，否则看着就像它自己冒出来的。
+function compatSince() {
+    const at = playbackSettings().compatAt;
+    const when = Date.parse(String(at || ''));
+    if (!Number.isFinite(when)) return '这一版之前就开着，没有记录。';
+    return `上次打开：${new Date(when).toLocaleString()}。`;
+}
+
 function effectsEnabled() {
     return playbackSettings().sfx !== false;
 }
@@ -1967,7 +1976,7 @@ function diagnoseRender() {
     const report = {
         总开关: enabled(),
         渲染方式: renderMode(),
-        前端卡兼容: compatMode(),
+        前端卡兼容: compatMode() ? `开着（${compatSince()}）` : '关着',
         台词格式: format,
         格式化钩子: formatterHooked
             ? '已装上'
@@ -1985,7 +1994,7 @@ function diagnoseRender() {
     if (raw) console.info('[tts-afterdrought] 正文开头 200 字：', raw.slice(0, 200));
     let verdict = '看不出来断在哪一层，把这些发出去';
     if (!enabled()) verdict = '总开关是关的';
-    else if (compatMode()) verdict = '开着「前端卡兼容」，不会改写正文，也就不会有气泡';
+    else if (compatMode()) verdict = `开着「前端卡兼容」，不会改写正文，也就不会有气泡（${compatSince()}去「播放」页或点上面的「关掉并重画」）`;
     else if (!chat) verdict = '取不到聊天记录：SillyTavern.getContext() 没返回 chat';
     else if (!raw) verdict = '最后一条正文是空的';
     else if (!looksLikeVoice(raw)) verdict = '正文里没有语音标签：模型没按台词格式写，或者提示词没注入';
@@ -2371,6 +2380,12 @@ function paintControls() {
     document.querySelectorAll('[data-tad="buffer"]').forEach((node) => {
         node.disabled = settings.playback.progressive !== true;
     });
+    document.querySelectorAll('[data-tad="compat-note"]').forEach((node) => {
+        node.hidden = settings.playback.compat !== true;
+    });
+    document.querySelectorAll('[data-tad="compat-note-text"]').forEach((node) => {
+        node.textContent = `「前端卡兼容」开着：正文不会被改写，所以不会出气泡、也不会发合成请求。${compatSince()}`;
+    });
     document.querySelectorAll('[data-tad="auto-infer-note"]').forEach((node) => {
         // 对白范围本来就会自动合成，这个开关只在全文和兼容模式下起作用。
         const useful = settings.playback.scope === 'full' || settings.playback.compat === true;
@@ -2412,7 +2427,14 @@ function commitSettings(patch) {
         }
     }
     if (patch.playback) {
+        // 兼容模式只有这个开关会写，一旦写进 localStorage 就会一直保持，代码里没有任何地方把它设回 true。
+        // 有人反馈「它自己开着」，所以每次翻转都留一条：时间写进设置，来源打进控制台，能追到是谁改的。
+        const compatBefore = settings.playback.compat === true;
         Object.assign(settings.playback, patch.playback);
+        if (patch.playback.compat !== undefined && (patch.playback.compat === true) !== compatBefore) {
+            settings.playback.compatAt = new Date().toISOString();
+            console.info('[tts-afterdrought] 前端卡兼容 →', patch.playback.compat === true, new Error('改这个开关的来源').stack);
+        }
         settings.playback.bufferSize = Math.max(1, Math.min(20, Number(settings.playback.bufferSize) || 5));
         settings.playback.volume = Math.max(0, Math.min(1, Number(settings.playback.volume)));
         if (Number.isNaN(settings.playback.volume)) settings.playback.volume = 1;
@@ -2897,7 +2919,20 @@ function mainModule() {
     diag.textContent = '查一次为什么不渲染';
     diag.title = '打印总开关、格式化钩子、台词格式、最后一条原文和解析结果';
     diag.addEventListener('click', () => diagnoseRender());
-    box.append(connectionBox(), switches, render, scope, note, diag);
+    // 兼容模式在「播放」页，开着的时候这一页看起来一切正常却永远不出气泡——太容易看漏，所以这里单独提醒一句。
+    const compatNote = document.createElement('div');
+    compatNote.className = 'tad-hint tad-compat-note';
+    compatNote.dataset.tad = 'compat-note';
+    compatNote.hidden = true;
+    const compatText = document.createElement('span');
+    compatText.dataset.tad = 'compat-note-text';
+    const compatFix = document.createElement('button');
+    compatFix.type = 'button';
+    compatFix.className = 'tad-check';
+    compatFix.textContent = '关掉并重画';
+    compatFix.addEventListener('click', () => commitSettings({ playback: { compat: false } }));
+    compatNote.append(compatText, compatFix);
+    box.append(connectionBox(), switches, render, scope, note, compatNote, diag);
     return box;
 }
 
