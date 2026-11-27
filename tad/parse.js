@@ -315,6 +315,65 @@ function badSpeaker(speaker) {
         || PLACEHOLDER_ROLE.test(speaker);
 }
 
+// ---------------------------------------------------------------------------
+// 另一种常见写法：`[甘雨, 害羞] “你、你怎么突然说这种话……”`、`【胡桃，惊喜】「早上好。」`。
+// 角色卡和模型自带的老习惯都写这个，`<tts>` 一句都没有的楼层就按这里解析。
+// 只在标准形状一句都没匹配上时才走：两种写法不会互相抢，也不会把同一句解析两遍。
+// 括号后面必须紧跟引号——`[系统] 状态已更新` 这种旁白/状态栏不会被当成台词。
+const BRACKET_HEAD = /[[【]\s*([^[\]【】\n]{1,40}?)\s*(?:[,，、|｜]\s*([^[\]【】\n]{0,40}?)\s*)?[\]】][ \t]*/g;
+const BRACKET_QUOTE = /^([“「『"])([^“”「」『』\n]{1,2000})([”」』"])/;
+const NOT_SPEAKER = /^(?:旁白|旁述|叙述|系统|状态|场景|时间|地点|选项|提示|注|内心|心声|独白|narrator|system)$/i;
+const BRACKET_NUMERIC = /^[\d\s:：\-—.．/]+$/;
+
+function bracketLineAt(text, from) {
+    BRACKET_HEAD.lastIndex = from;
+    let match;
+    while ((match = BRACKET_HEAD.exec(text)) !== null) {
+        const after = text.slice(match.index + match[0].length);
+        const quote = after.match(BRACKET_QUOTE);
+        if (!quote) continue;
+        const speaker = decodeBasicEntities(match[1]).trim();
+        if (!speaker || NOT_SPEAKER.test(speaker) || BRACKET_NUMERIC.test(speaker)) continue;
+        if (badSpeaker(speaker)) continue;
+        const spoken = decodeBasicEntities(quote[2]).trim();
+        if (!spoken) continue;
+        const emotion = decodeBasicEntities(match[2] || '').trim();
+        return { match, quote, speaker, emotion, spoken };
+    }
+    return null;
+}
+
+/** 正文里有没有 `[角色, 情绪] “台词”` 这种写法：格式识别入口用，避免合法台词被拦在门外。 */
+export function hasBracketLine(source) {
+    const text = String(source || '');
+    return bracketLineAt(text, 0) !== null;
+}
+
+function parseBracketLines(text, mask) {
+    const lines = [];
+    let at = 0;
+    while (at < text.length) {
+        const found = bracketLineAt(text, at);
+        if (!found) break;
+        const start = found.match.index;
+        const end = start + found.match[0].length + found.quote[0].length;
+        at = end;
+        if (mask && mask[start]) continue;
+        lines.push({
+            kind: 'tts',
+            start,
+            end,
+            speaker: found.speaker,
+            emotion: found.emotion || 'default',
+            text: found.spoken,
+            translation: found.spoken,
+            inner: innerEmotion(found.emotion),
+            settled: true,
+        });
+    }
+    return lines;
+}
+
 function readFormatLine(source, match, format) {
     const values = {};
     format.names.forEach((name, index) => {
@@ -391,6 +450,12 @@ function parseStandard(text, streaming, format) {
         }
         lines.push(read.line);
         searchFrom = read.line.end;
+    }
+
+    // 一句 `<tts>` 都没有，再看方括号写法：`[甘雨, 害羞] “……”`。有 `<tts>` 时绝不走这里，免得同一句解析两遍。
+    if (!lines.length) {
+        const bracket = parseBracketLines(text, mask);
+        if (bracket.length) return { lines: bracket, problems: [] };
     }
 
     // 边生成边判断会误报（标签还没写完），等这段话生成完再提示。

@@ -1,5 +1,5 @@
 import { eventSource, event_types, setExtensionPrompt, extension_prompt_types, extension_prompt_roles } from '../../../../script.js';
-import { compileFormat, DEFAULT_VOICE_FORMAT, formatProblem, parseDialogueLines, splitSentences, voiceEffect } from './tad/parse.js';
+import { compileFormat, DEFAULT_VOICE_FORMAT, formatProblem, hasBracketLine, parseDialogueLines, splitSentences, voiceEffect } from './tad/parse.js';
 import { markLine, unmark, waveMarks } from './tad/mark.js';
 import { VoiceEngine, joinBlobs } from './tad/audio.js';
 import { audioStore } from './tad/store.js';
@@ -993,6 +993,22 @@ function installFormatterHooks() {
     return true;
 }
 
+// 扩展是 before_body 加载的，有的酒馆版本这时 getContext() 还没把 messageFormatter 挂上去。
+// 以前只在启动时试一次，装不上就静默退回改 DOM 那条老路；现在隔一会儿再试，最多二十秒。
+let hookRetries = 0;
+function ensureFormatterHooks() {
+    if (installFormatterHooks()) return true;
+    if (hookRetries >= 40) return false;
+    hookRetries += 1;
+    setTimeout(() => {
+        if (ensureFormatterHooks()) {
+            logSelfCheck();
+            refreshRenderedMessages();
+        }
+    }, 500);
+    return false;
+}
+
 // 缓存以前只进不出，用久了 IndexedDB 会一路涨到配额。按条数和总字节做 LRU 淘汰。
 const CACHE_MAX_ITEMS = 2000;
 const CACHE_MAX_BYTES = 400 * 1024 * 1024;
@@ -1899,11 +1915,16 @@ function literalAppears(raw, literal) {
     return [...variants].some((part) => part && raw.includes(part));
 }
 
+// 只认完整的 `<tts>` 会漏两种常见写法：模型抄成 `<tts >`（多一个空格），
+// 以及边生成边显示时还没写完的 `<tts`。漏掉的后果是整楼既不渲染也不入队，还一句提示都没有。
+const TTS_OPEN = /<(?:i-)?tts(?=[\s/>]|$)/i;
+
 function looksLikeVoice(raw) {
     if (!raw) return false;
-    if (/<(?:i-)?tts>/i.test(raw)) return true;
+    if (TTS_OPEN.test(raw)) return true;
     const format = compileFormat(voiceFormat());
-    if (format.standard) return false;
+    // 标准形状除了 `<tts>` 还接受 `[甘雨, 害羞] “……”`：只认标签会把模型最常见的写法拦在门外。
+    if (format.standard) return hasBracketLine(raw);
     const literal = format.literals.map((part) => String(part || '')).find((part) => part.trim());
     // 模板里连一段固定文字都没有时判断不了，交给解析器去看。
     if (!literal) return true;
@@ -1921,6 +1942,58 @@ function logSelfCheck() {
         角色表: `${gatewayCharacters.length} 人`,
         格式化钩子: formatterHooked ? '已接管' : (typeof ctx?.messageFormatter?.addHook === 'function' ? '可装' : '没有，走改 DOM'),
     });
+}
+
+// 「为什么没有气泡」一次查到底：开关、钩子、台词格式、原始正文、解析结果、页面上的控件。
+// 逐层打印，第一次断在哪一层就是结论，不用再猜是设置、模型写法还是钩子没跑。
+function diagnoseRender() {
+    const ctx = chatContext();
+    const chat = Array.isArray(ctx?.chat) ? ctx.chat : null;
+    const mes = [...document.querySelectorAll('#chat .mes')].pop() || null;
+    const id = Number(mes?.getAttribute('mesid'));
+    const entry = Number.isInteger(id) ? chat?.[id] : null;
+    const raw = rawOf(entry);
+    const format = voiceFormat();
+    let lines = 0;
+    let problems = [];
+    try {
+        const parsed = parseDialogueLines(raw, { format });
+        lines = parsed.lines.length;
+        problems = parsed.problems;
+    } catch (error) {
+        problems = [`解析抛错：${error?.message || error}`];
+    }
+    const controls = document.querySelectorAll(`#chat ${VOICE_NODE}`).length;
+    const report = {
+        总开关: enabled(),
+        渲染方式: renderMode(),
+        前端卡兼容: compatMode(),
+        台词格式: format,
+        格式化钩子: formatterHooked
+            ? '已装上'
+            : (typeof ctx?.messageFormatter?.addHook === 'function' ? '酒馆有，还没装上' : '酒馆没有这个钩子，走改 DOM'),
+        聊天记录: chat ? `${chat.length} 条` : '取不到（SillyTavern.getContext() 没返回 chat）',
+        最后一条: entry ? `#${id} ${entry.name || ''}` : '取不到',
+        正文长度: raw.length,
+        正文里有语音标签: looksLikeVoice(raw),
+        解析出几句: lines,
+        解析问题: problems.length ? problems : '无',
+        页面上的语音控件: controls,
+        别的扩展在接管正文: !!document.querySelector('[data-sttts-token], [data-sttts-line], .sttts-wave'),
+    };
+    console.info('[tts-afterdrought] 渲染诊断', report);
+    if (raw) console.info('[tts-afterdrought] 正文开头 200 字：', raw.slice(0, 200));
+    let verdict = '看不出来断在哪一层，把这些发出去';
+    if (!enabled()) verdict = '总开关是关的';
+    else if (compatMode()) verdict = '开着「前端卡兼容」，不会改写正文，也就不会有气泡';
+    else if (!chat) verdict = '取不到聊天记录：SillyTavern.getContext() 没返回 chat';
+    else if (!raw) verdict = '最后一条正文是空的';
+    else if (!looksLikeVoice(raw)) verdict = '正文里没有语音标签：模型没按台词格式写，或者提示词没注入';
+    else if (!lines) verdict = `正文里有标签，但按当前格式解析不出来：${problems[0] || '格式不匹配'}`;
+    else if (!controls) verdict = '能解析出台词，但页面上没有控件：格式化钩子没被调用（刷新一次页面再看）';
+    else verdict = `正常：解析出 ${lines} 句，页面上有 ${controls} 个控件`;
+    notify('warning', `诊断：${verdict}`);
+    return report;
 }
 
 // 钩子装上去了，但有些酒馆版本正文走的不是这条格式化路径（或者被别的扩展整个接管），
@@ -2817,7 +2890,14 @@ function mainModule() {
     });
     render.querySelector('select').addEventListener('change', (event) => commitSettings({ render: event.target.value }));
     scope.querySelector('select').addEventListener('change', (event) => commitSettings({ playback: { scope: event.target.value } }));
-    box.append(connectionBox(), switches, render, scope, note);
+    // 一行结论 + 控制台明细：没有气泡时先点这里，比挨个翻设置快。
+    const diag = document.createElement('button');
+    diag.type = 'button';
+    diag.className = 'tad-check';
+    diag.textContent = '查一次为什么不渲染';
+    diag.title = '打印总开关、格式化钩子、台词格式、最后一条原文和解析结果';
+    diag.addEventListener('click', () => diagnoseRender());
+    box.append(connectionBox(), switches, render, scope, note, diag);
     return box;
 }
 
@@ -3249,7 +3329,7 @@ function init() {
         localStorage.setItem(STORAGE.api, DEFAULT_API);
     }
     // 正文渲染不能等界面搭完：搭界面哪一步抛错，后面的钩子就装上不去，读者只会看到剥了标签的正文。
-    installFormatterHooks();
+    ensureFormatterHooks();
     applyDialoguePrompt();
     if (enabled()) {
         loadEmotionNames();
@@ -3261,7 +3341,11 @@ function init() {
     buildShell();
     mountExtensionSettings();
     if (event_types.APP_READY) {
-        eventSource.on(event_types.APP_READY, mountExtensionSettings);
+        eventSource.on(event_types.APP_READY, () => {
+            mountExtensionSettings();
+            // 酒馆这时候一定已经起来了：之前没装上的钩子在这里补一次。
+            ensureFormatterHooks();
+        });
     }
     bindBubbleMenu();
     // 播放进度统一走这一个回调：播放条进度、当前句高亮都从这里来。
@@ -3283,7 +3367,7 @@ function init() {
     const observer = new MutationObserver(scheduleScan);
     observer.observe(document.body, { childList: true, subtree: true, characterData: true });
     // 钩子先装：装完让酒馆把已有楼层重画一遍，历史消息也能拿到气泡。
-    installFormatterHooks();
+    ensureFormatterHooks();
     logSelfCheck();
     if (formatterHooked) refreshRenderedMessages();
     else scan();
