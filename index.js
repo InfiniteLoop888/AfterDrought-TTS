@@ -23,9 +23,11 @@ const FALLBACK_EMOTIONS = ['平静', '日常', '自然', '温柔', '轻松', '�
 let emotionNames = FALLBACK_EMOTIONS.slice();
 let gatewayCharacters = [];
 
-const BARS_HTML = '<span class="sovits-voice-waves"><span class="sovits-voice-bar"></span><span class="sovits-voice-bar"></span><span class="sovits-voice-bar"></span></span>';
+// 酒馆 1.19 的 MESSAGE_SANITIZE 会给正文里的每个 class 加 custom- 前缀（只放行 fa-/note-/monospace），
+// 所以正文控件的锚点一律用 data-*：DOMPurify 不动 data 属性，class 在 1.19 里保不住。
+const BARS_HTML = '<span data-tad="waves"><span data-tad="bar"></span><span data-tad="bar"></span><span data-tad="bar"></span></span>';
 const BUBBLE_ROOTS = '.mes_text, .message-body, .markdown-content, #chat .mes_text, .mes .text';
-const VOICE_NODE = '.tad-voice';
+const VOICE_NODE = '[data-tad="voice"]';
 const LONG_PRESS_MS = 550;
 
 const REQUEST_TIMEOUT_MS = 120000;
@@ -708,7 +710,6 @@ function voiceAttrs(speaker, emotion, text, settled) {
     const key = bubbleKey(speaker, spoken.emotion, text);
     const cached = memory.get(key) || '';
     const status = cached ? 'ready' : (pending.has(key) ? 'queued' : 'waiting');
-    const loading = status === 'queued' ? ' loading' : '';
     const url = cached ? ` data-audio-url="${escapeHtmlAttr(cached)}"` : '';
     const settledAttr = settled ? '' : ' data-settled="0"';
     const effectAttr = spoken.effect ? ` data-effect="${spoken.effect}"` : '';
@@ -717,7 +718,7 @@ function voiceAttrs(speaker, emotion, text, settled) {
     const label = `播放 ${speaker}${shownEmotion}${effectName ? `（${effectName}音效）` : ''}`;
     // 声波是 span，键盘和读屏都够不着。补上按钮语义和标签。
     const attrs = ` role="button" tabindex="0" aria-label="${escapeHtmlAttr(label)}" data-status="${status}" data-key="${escapeHtmlAttr(key)}"${url} data-text="${escapeHtmlAttr(text)}" data-voice-name="${escapeHtmlAttr(speaker)}" data-voice-emotion="${escapeHtmlAttr(spoken.emotion)}"${effectAttr}${settledAttr}`;
-    return { loading, attrs };
+    return { attrs };
 }
 
 function buildBubbleHtml(speaker, emotion, text, settled = true, inner = false) {
@@ -730,11 +731,11 @@ function buildBubbleHtml(speaker, emotion, text, settled = true, inner = false) 
     const effectName = spoken.effect === 'phone' ? '电话' : (spoken.effect === 'inner' ? '心声' : '');
     const shown = spoken.emotion && spoken.emotion !== 'default' ? ` · ${spoken.emotion}` : '';
     const tip = `${speaker}${shown}${effectName ? `（${effectName}）` : ''}：${excerpt}`;
-    return `<span class="voice-bubble tad-voice${state.loading}" style="width: ${width}px"${state.attrs}${inner ? ' data-inner="1"' : ''} title="${escapeHtmlAttr(tip)}">${BARS_HTML}<span class="sovits-voice-duration">${seconds}&quot;</span></span>`;
+    return `<span data-tad="voice" data-tad-kind="bubble" style="width: ${width}px"${state.attrs}${inner ? ' data-inner="1"' : ''} title="${escapeHtmlAttr(tip)}">${BARS_HTML}<span data-tad="duration">${seconds}&quot;</span></span>`;
 }
 
 function spokenColor(html, inner = false) {
-    return `<span class="tad-spoken${inner ? ' tad-inner' : ''}">${html}</span>`;
+    return `<span data-tad="spoken"${inner ? ' data-inner="1"' : ''}>${html}</span>`;
 }
 
 function presentDialogue(text, inner = false) {
@@ -771,8 +772,7 @@ function buildLineHtml(speaker, emotion, text, settled = true, options = {}) {
     const title = `${speaker}${spoken.emotion && spoken.emotion !== 'default' ? ` · ${spoken.emotion}` : ''}${effectName ? `（${effectName}）` : ''}`;
     const display = options.display ?? presentDialogue(text, options.inner);
     const innerAttr = options.inner ? ' data-inner="1"' : '';
-    const innerClass = options.inner ? ' tad-inner' : '';
-    return `<span class="tad-line tad-voice${state.loading}${innerClass}"${state.attrs}${innerAttr} title="${escapeHtmlAttr(title)}"><span class="tad-line-body">${escapeHtmlAttr(display)}</span><span class="tad-line-mark">${BARS_HTML}</span></span>`;
+    return `<span data-tad="voice" data-tad-kind="line"${state.attrs}${innerAttr} title="${escapeHtmlAttr(title)}"><span data-tad="line-body">${escapeHtmlAttr(display)}</span><span data-tad="line-mark">${BARS_HTML}</span></span>`;
 }
 
 function speakerKnown(name) {
@@ -793,8 +793,8 @@ function warnUnknownSpeaker(name) {
 
 function keptFromNode(node) {
     const inner = node.dataset.inner === '1';
-    if (node.classList.contains('tad-line')) {
-        return node.querySelector('.tad-line-body')?.textContent || presentDialogue(node.dataset.text || '', inner);
+    if (node.dataset.tadKind === 'line') {
+        return node.querySelector('[data-tad="line-body"]')?.textContent || presentDialogue(node.dataset.text || '', inner);
     }
     return presentDialogue(node.dataset.text || '', inner);
 }
@@ -843,11 +843,10 @@ function refreshVoiceKeys() {
 
 function releaseVoiceNode(node) {
     const plain = document.createElement('span');
-    plain.className = 'tad-kept';
+    plain.dataset.tad = 'kept';
     plain.textContent = keptFromNode(node);
     // 心声退回纯文本时也保留斜体、不带引号。
     if (node.dataset.inner === '1') {
-        plain.classList.add('tad-inner');
         plain.dataset.inner = '1';
     }
     forgetVoice(node.dataset.key);
