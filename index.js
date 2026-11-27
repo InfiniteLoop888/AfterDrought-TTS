@@ -245,7 +245,8 @@ async function loadEmotionNames() {
 }
 
 function rosterNames(item) {
-    const name = String(item.display_name || item.character_id || '').trim();
+    // 第三方网关只回 name 也认，不然整个角色表读出来是空的，气泡全被判成陌生角色。
+    const name = String(item.display_name || item.character_id || item.name || '').trim();
     const aliases = (Array.isArray(item.aliases) ? item.aliases : [])
         .map((alias) => String(alias || '').trim())
         .filter((alias) => alias && alias !== name);
@@ -327,7 +328,6 @@ async function loadGatewayCharacters() {
         gatewayCharacters = next;
         // 角色表没变就别碰 DOM。以前轮询每 3 秒把所有气泡重新算一遍缓存键。
         if (changed) {
-            releaseUnknownVoices();
             refreshVoiceKeys();
             applyDialoguePrompt();
             paintControls();
@@ -632,8 +632,24 @@ function escapeHtmlAttr(value) {
 function gatewayCharacter(name) {
     const key = String(name || '').trim().toLowerCase();
     if (!key) return null;
-    return gatewayCharacters.find((entry) => [entry.character_id, entry.display_name, ...(Array.isArray(entry.aliases) ? entry.aliases : [])]
-        .some((part) => String(part || '').trim().toLowerCase() === key)) || null;
+    const fields = (entry) => [entry.character_id, entry.display_name, entry.name, ...(Array.isArray(entry.aliases) ? entry.aliases : [])]
+        .map((part) => String(part || '').trim())
+        .filter(Boolean);
+    const exact = gatewayCharacters.find((entry) => fields(entry).some((part) => part.toLowerCase() === key));
+    if (exact) return exact;
+    // 角色表里叫「胡桃｜HuTao」、正文里写「胡桃」，或者反过来带空格/标点，都算同一个人。
+    // 只认全等的话，这些楼会被当成陌生角色整句退成纯文本——气泡不出现，自然也不会有语音请求。
+    const fuzzy = normalizeName(name);
+    if (!fuzzy) return null;
+    return gatewayCharacters.find((entry) => fields(entry).some((part) => normalizeName(part) === fuzzy)) || null;
+}
+
+// 名字比较用：去空格、去包装标点，大小写不敏感。
+function normalizeName(value) {
+    return String(value || '')
+        .toLowerCase()
+        .replace(/[\s\u3000]+/g, '')
+        .replace(/[·・•‧∙⋅/／\\|｜_\-—–~～.,，。:：;；!！?？'"“”‘’()（）\[\]【】<>《》]/g, '');
 }
 
 // 同一个角色的不同写法归到一个显示名：模型有时写别名（甘雨/王小美），有时只写全名的一段。
@@ -755,11 +771,15 @@ function speakerKnown(name) {
     return gatewayCharacter(name) !== null;
 }
 
-function keptHtml(speaker, text, inner = false) {
-    const innerClass = inner ? ' tad-inner' : '';
-    const shown = String(text || '').trim();
-    const innerAttr = inner ? ' data-inner="1"' : '';
-    return `<span class="tad-kept${innerClass}"${innerAttr}>${escapeHtmlAttr(shown ? presentDialogue(shown, inner) : '')}</span>`;
+// 同一个名字只提示一次：每楼每句都弹一遍反而看不清。
+const warnedSpeakers = new Set();
+function warnUnknownSpeaker(name) {
+    const key = normalizeName(name) || String(name || '');
+    if (warnedSpeakers.has(key)) return;
+    warnedSpeakers.add(key);
+    const roster = gatewayCharacters.map((item) => rosterNames(item).name).filter(Boolean).slice(0, 8).join('、');
+    console.warn(`[tts-afterdrought] 网关角色表里没有「${name}」，这句可能合不出来。表里有：${roster || '（空）'}`);
+    notify('warning', `网关角色表里没有「${name}」，这句可能合不出来。表里有：${roster || '（空）'}`);
 }
 
 function keptFromNode(node) {
@@ -829,13 +849,6 @@ function releaseVoice(key) {
     bubblesByKey(key).forEach(releaseVoiceNode);
 }
 
-function releaseUnknownVoices() {
-    if (!gatewayCharacters.length) return;
-    document.querySelectorAll(`#chat ${VOICE_NODE}`).forEach((node) => {
-        if (!speakerKnown(node.dataset.voiceName)) releaseVoiceNode(node);
-    });
-}
-
 class SkipVoice extends Error {}
 
 // 一组语音标记：正文按行切成「旁白 + 标记 + 旁白 …」，控件 HTML 单独留在 controls 里，
@@ -878,7 +891,9 @@ function lineVoiceHtml(line) {
     const speaker = canonicalSpeaker(line.speaker);
     const inner = line.inner === true || innerVoice(line.emotion);
     const shown = line.tagOnly ? '' : (line.translation || line.text);
-    if (gatewayCharacters.length && !speakerKnown(speaker)) return keptHtml(speaker, shown, inner);
+    // 角色表里查不到这个人时，以前整句退成纯文本——读者只会看到「没有气泡也没有请求」。
+    // 现在照挂气泡，点下去让网关自己报错，同时提示一次是哪个名字对不上。
+    if (gatewayCharacters.length && !speakerKnown(speaker)) warnUnknownSpeaker(speaker);
     if (renderMode() === 'line') {
         const display = shown ? presentDialogue(shown, inner) : '';
         return buildLineHtml(speaker, line.emotion, line.text, line.settled, { display, inner });
@@ -1882,15 +1897,48 @@ function logSelfCheck() {
         兼容模式: compatMode(),
         台词格式: voiceFormat(),
         聊天记录: Array.isArray(ctx?.chat) ? ctx.chat.length : '取不到',
+        角色表: `${gatewayCharacters.length} 人`,
         格式化钩子: formatterHooked ? '已接管' : (typeof ctx?.messageFormatter?.addHook === 'function' ? '可装' : '没有，走改 DOM'),
     });
+}
+
+// 钩子装上去了，但有些酒馆版本正文走的不是这条格式化路径（或者被别的扩展整个接管），
+// 钩子一次都不会被调用：正文里有 <tts>，楼里却没有控件。补一道兜底，按老办法重画一遍。
+let repairLogged = false;
+function repairMissingBubbles() {
+    if (generating() || !enabled() || skipRewrite()) return false;
+    const ctx = chatContext();
+    const chat = Array.isArray(ctx?.chat) ? ctx.chat : null;
+    if (!chat) return false;
+    let repaired = 0;
+    document.querySelectorAll('#chat .mes').forEach((mes) => {
+        const text = mes.querySelector('.mes_text');
+        if (!text || text.tagName !== 'DIV' || text.querySelector('#curEditTextarea')) return;
+        if (text.querySelector(VOICE_NODE)) return;
+        const id = Number(mes.getAttribute('mesid'));
+        const entry = Number.isInteger(id) ? chat[id] : null;
+        if (!entry) return;
+        const raw = rawOf(entry);
+        if (!looksLikeVoice(raw)) return;
+        const next = rawTtsHtml(raw, entry, id);
+        if (!next || next === text.innerHTML) return;
+        text.innerHTML = next;
+        repaired += 1;
+    });
+    if (repaired && !repairLogged) {
+        repairLogged = true;
+        console.warn(`[tts-afterdrought] 格式化钩子没把控件画进正文，已用兜底重画 ${repaired} 楼`);
+    }
+    return repaired > 0;
 }
 
 function scan() {
     mountFullButtons();
     if (!enabled() || skipRewrite()) return;
-    // 钩子接手了正文，这里再改 DOM 只会跟酒馆的渲染抢同一个节点。
+    // 钩子接手了正文，这里再改 DOM 只会跟酒馆的渲染抢同一个节点；
+    // 只有「正文有标签、楼里却没有控件」时才动手。
     if (formatterHooked) {
+        repairMissingBubbles();
         if (!generating()) playNewReply = false;
         return;
     }
