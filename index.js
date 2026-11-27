@@ -26,7 +26,6 @@ let gatewayCharacters = [];
 // 酒馆 1.19 的 MESSAGE_SANITIZE 会给正文里的每个 class 加 custom- 前缀（只放行 fa-/note-/monospace），
 // 所以正文控件的锚点一律用 data-*：DOMPurify 不动 data 属性，class 在 1.19 里保不住。
 const BARS_HTML = '<span data-tad="waves"><span data-tad="bar"></span><span data-tad="bar"></span><span data-tad="bar"></span></span>';
-const BUBBLE_ROOTS = '.mes_text, .message-body, .markdown-content, #chat .mes_text, .mes .text';
 const VOICE_NODE = '[data-tad="voice"]';
 const LONG_PRESS_MS = 550;
 
@@ -796,6 +795,9 @@ function keptFromNode(node) {
     if (node.dataset.tadKind === 'line') {
         return node.querySelector('[data-tad="line-body"]')?.textContent || presentDialogue(node.dataset.text || '', inner);
     }
+    // 气泡模式：读者看到的是气泡前面那句译文，退回纯文本时留下的也该是译文，不是原文。
+    const spoken = node.previousElementSibling;
+    if (spoken?.dataset?.tad === 'spoken') return spoken.textContent || '';
     return presentDialogue(node.dataset.text || '', inner);
 }
 
@@ -850,11 +852,114 @@ function releaseVoiceNode(node) {
         plain.dataset.inner = '1';
     }
     forgetVoice(node.dataset.key);
+    // 气泡模式前面那颗译文节点已经并进 kept 里了，留着会显示两遍。
+    const spoken = node.dataset.tadKind === 'line' ? null : node.previousElementSibling;
     node.replaceWith(plain);
+    if (spoken?.dataset?.tad === 'spoken') dropSpoken(spoken);
 }
 
 function releaseVoice(key) {
     bubblesByKey(key).forEach(releaseVoiceNode);
+}
+
+// build*Html 产出的是字符串，落地时统一走 template：属性顺序、引号都由浏览器自己决定。
+function htmlToNodes(html) {
+    const tpl = document.createElement('template');
+    tpl.innerHTML = String(html).trim();
+    return tpl.content;
+}
+
+function dropSpoken(spoken) {
+    if (!spoken) return;
+    const gap = spoken.nextSibling;
+    if (gap?.nodeType === Node.TEXT_NODE && !gap.textContent.trim()) gap.remove();
+    spoken.remove();
+}
+
+// 控件当前显示的那句译文：和退回纯文本用的是同一份，换形态时原样搬过去。
+function voiceDisplayOf(node) {
+    return keptFromNode(node);
+}
+
+// 气泡 ↔ 台词就地换形态：只替换这一个控件（和它自己的译文节点），别的 DOM 一个都不碰。
+function recastVoiceNode(node, mode) {
+    const kind = node.dataset.tadKind;
+    if (!node.dataset.voiceName || !mode || kind === mode) return;
+    const name = node.dataset.voiceName;
+    const emotion = node.dataset.voiceEmotion || 'default';
+    const text = node.dataset.text || '';
+    const inner = node.dataset.inner === '1';
+    const settled = node.dataset.settled !== '0';
+    const display = voiceDisplayOf(node);
+    if (mode === 'line') {
+        const spoken = node.previousElementSibling?.dataset?.tad === 'spoken' ? node.previousElementSibling : null;
+        node.replaceWith(htmlToNodes(buildLineHtml(name, emotion, text, settled, { display, inner })));
+        dropSpoken(spoken);
+        return;
+    }
+    node.replaceWith(htmlToNodes(`${spokenColor(escapeHtmlAttr(display), inner)} ${buildBubbleHtml(name, emotion, text, settled, inner)}`));
+}
+
+function recastVoices(mode) {
+    document.querySelectorAll(`#chat ${VOICE_NODE}`).forEach((node) => {
+        try {
+            recastVoiceNode(node, mode);
+        } catch { /* 单个节点换形态失败就保持原样，别把整楼搭进去 */ }
+    });
+}
+
+// 关掉总开关时控件退回纯文本（data-tad="kept"），再开时按楼层顺序还原回控件。
+// 行数和退回的纯文本对不上就整楼跳过：这说明这一楼被别的东西改过，重建反而会插错位置。
+function reviveKeptVoices() {
+    const ctx = chatContext();
+    const chat = Array.isArray(ctx?.chat) ? ctx.chat : null;
+    if (!chat) return 0;
+    const mode = renderMode();
+    let revived = 0;
+    document.querySelectorAll('#chat .mes').forEach((mes) => {
+        const text = mes.querySelector('.mes_text');
+        if (!text || text.querySelector(VOICE_NODE)) return;
+        const kept = [...text.querySelectorAll('[data-tad="kept"]')];
+        if (!kept.length) return;
+        const id = Number(mes.getAttribute('mesid'));
+        const entry = Number.isInteger(id) ? chat[id] : null;
+        const raw = rawOf(entry);
+        if (!looksLikeVoice(raw)) return;
+        const { lines } = parseDialogueLines(raw, { format: voiceFormat() });
+        if (lines.length !== kept.length) return;
+        kept.forEach((stale, index) => {
+            const line = lines[index];
+            const inner = line.inner === true || innerVoice(line.emotion);
+            const display = stale.textContent ?? '';
+            const speaker = canonicalSpeaker(line.speaker);
+            if (mode === 'line') {
+                stale.replaceWith(htmlToNodes(buildLineHtml(speaker, line.emotion, line.text, line.settled, { display, inner })));
+            } else {
+                const spoken = stale.previousElementSibling?.dataset?.tad === 'spoken' ? stale.previousElementSibling : null;
+                const html = `${spokenColor(escapeHtmlAttr(display), inner)} ${buildBubbleHtml(speaker, line.emotion, line.text, line.settled, inner)}`;
+                stale.replaceWith(htmlToNodes(html));
+                dropSpoken(spoken);
+            }
+            revived += 1;
+        });
+    });
+    return revived;
+}
+
+// 启动时钩子还没赶上历史楼：正文里是剥掉标签的「角色|情绪|文本」裸串。走同一套文本节点
+// patch，只替换标记那一段，楼层里别的节点（折叠块、前端卡）原样留着。
+function reclaimPlainMessages() {
+    const ctx = chatContext();
+    const chat = Array.isArray(ctx?.chat) ? ctx.chat : null;
+    if (!chat) return 0;
+    let drawn = 0;
+    document.querySelectorAll('#chat .mes').forEach((mes) => {
+        const text = mes.querySelector('.mes_text');
+        if (!text || text.tagName !== 'DIV' || text.querySelector('#curEditTextarea')) return;
+        if (text.querySelector(VOICE_NODE) || text.querySelector('[data-tad="kept"]')) return;
+        drawn += patchMesText(text, Number(mes.getAttribute('mesid')), chat).patched;
+    });
+    return drawn;
 }
 
 class SkipVoice extends Error {}
@@ -1011,7 +1116,7 @@ function ensureFormatterHooks() {
     setTimeout(() => {
         if (ensureFormatterHooks()) {
             logSelfCheck();
-            refreshRenderedMessages();
+            refreshRenderedMessages({ drawPlain: true });
         }
     }, 500);
     return false;
@@ -2004,39 +2109,158 @@ function diagnoseRender() {
     return report;
 }
 
+// ---------- 文本节点级补画 ----------
+// 钩子没跑到的楼层，正文里只剩下被剥掉标签的「角色|情绪|文本」裸文字。
+// 这里只替换那一段文字（Range），控件就地插入，楼层里别的节点一概不碰：
+// 别的扩展注入的折叠块、前端卡、iframe 都留在原地。
+const NEEDLE_ESCAPE = /[.*+?^${}()|[\]\\]/g;
+
+// 「角色|情绪|文本」在正文里可能被换成全角竖线、被塞进空格甚至换行，这里构造宽松正则。
+function needlePattern(inner) {
+    const text = String(inner || '').trim();
+    if (!text) return null;
+    let src = '';
+    for (const ch of text) {
+        if (ch === '|' || ch === '｜') src += '\\s*[|｜]\\s*';
+        else if (/\s/.test(ch)) src += '\\s*';
+        else src += ch.replace(NEEDLE_ESCAPE, '\\$&');
+    }
+    return new RegExp(src);
+}
+
+// 一行标记在正文里的原始形状：角色|情绪|文本。自由格式没有情绪段。
+function lineNeedle(line) {
+    const parts = [line.speaker];
+    if (line.emotion && line.emotion !== 'default') parts.push(line.emotion);
+    parts.push(line.text);
+    return parts.filter(Boolean).join('|');
+}
+
+// 拼出整楼的可见文字，同时记住每个文本节点在全文里的起点，好在跨节点时换算回 Range。
+function textIndex(root) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+        acceptNode(node) {
+            if (!node.nodeValue) return NodeFilter.FILTER_REJECT;
+            const parent = node.parentElement;
+            // 已经画好的控件、气泡前的译文都跳过，免得把自己的 DOM 当成原文再匹配一遍。
+            if (parent?.closest?.(VOICE_NODE) || parent?.closest?.('[data-tad="spoken"]')) return NodeFilter.FILTER_REJECT;
+            return NodeFilter.FILTER_ACCEPT;
+        },
+    });
+    const spans = [];
+    let full = '';
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        spans.push({ node, start: full.length });
+        full += node.nodeValue;
+    }
+    return { full, spans };
+}
+
+function locateIn(spans, pos) {
+    for (let i = spans.length - 1; i >= 0; i -= 1) {
+        if (pos >= spans[i].start) return { node: spans[i].node, offset: pos - spans[i].start };
+    }
+    return null;
+}
+
+function rangeOf(spans, start, length) {
+    const from = locateIn(spans, start);
+    const to = locateIn(spans, start + length);
+    if (!from || !to) return null;
+    const range = document.createRange();
+    range.setStart(from.node, Math.min(from.offset, from.node.nodeValue.length));
+    range.setEnd(to.node, Math.min(to.offset, to.node.nodeValue.length));
+    return range;
+}
+
+// 钩子正常工作时，控件会连前面那句译文一起替掉（line.start 圈到了引号句）。
+// 补画要还原同样的结果：把紧邻标记前面的那句译文一起圈进来，不然正文会多一句重复的译文。
+function widenToTranslation(full, index, length, translation) {
+    let start = index;
+    let end = index + length;
+    const quoted = String(translation || '').trim();
+    if (!quoted) return { start, end };
+    const head = full.slice(0, index);
+    const at = head.lastIndexOf(quoted);
+    // 中间只剩空白才算「紧邻」；隔着别的内容就不敢吞，宁可留着重复也不删错东西。
+    if (at < 0 || head.slice(at + quoted.length).trim()) return { start, end };
+    start = at;
+    // 译文外面那对引号一起收掉，否则会剩下孤零零的「“」。
+    while (start > 0 && '「“『"'.includes(full[start - 1])) start -= 1;
+    while (end < full.length && '」”』"'.includes(full[end])) end += 1;
+    return { start, end };
+}
+
+function patchLineNode(root, line) {
+    const pattern = needlePattern(lineNeedle(line));
+    if (!pattern) return false;
+    const { full, spans } = textIndex(root);
+    const match = pattern.exec(full);
+    if (!match) return false;
+    const { start, end } = widenToTranslation(full, match.index, match[0].length, line.translation);
+    const range = rangeOf(spans, start, end - start);
+    if (!range) return false;
+    const inner = line.inner === true || innerVoice(line.emotion);
+    const shown = line.tagOnly ? '' : (line.translation || line.text);
+    // 关掉总开关时只收成译文（kept），再开启时 reviveKeptVoices 能把这份认回来。
+    const html = enabled()
+        ? lineVoiceHtml(line)
+        : `<span data-tad="kept"${inner ? ' data-inner="1"' : ''}>${escapeHtmlAttr(presentDialogue(shown, inner))}</span>`;
+    range.deleteContents();
+    range.insertNode(htmlToNodes(html));
+    return true;
+}
+
+// 把一楼的标记裸串就地换成控件。成功过就记 patch，避免每次 DOM 变动都重扫这一楼。
+function patchMesText(text, id, chat) {
+    const result = { patched: 0, missed: 0 };
+    if (!(text instanceof HTMLElement)) return result;
+    if (text.querySelector(VOICE_NODE)) {
+        // 已经有控件：这是钩子（或上一次 patch）画的，记下归属就够。
+        if (text.dataset.tadRender !== 'hook') text.dataset.tadRender = 'hook';
+        return result;
+    }
+    if (text.dataset.tadRender === 'patch') return result;
+    const entry = Number.isInteger(id) ? chat?.[id] : null;
+    const raw = rawOf(entry);
+    if (!looksLikeVoice(raw)) return result;
+    const { lines } = parseDialogueLines(raw, { format: voiceFormat() });
+    if (!lines.length) return result;
+    for (const line of lines) {
+        if (patchLineNode(text, line)) result.patched += 1;
+        else result.missed += 1;
+    }
+    if (result.patched) text.dataset.tadRender = 'patch';
+    return result;
+}
+
 // 钩子装上去了，但有些酒馆版本正文走的不是这条格式化路径（或者被别的扩展整个接管），
-// 钩子一次都不会被调用：正文里有 <tts>，楼里却没有控件。补一道兜底，按老办法重画一遍。
+// 钩子一次都不会被调用：正文里有 <tts>，楼里却没有控件。这里按文本节点补画，不重建楼层。
 let repairLogged = false;
 function repairMissingBubbles() {
     if (generating() || !enabled() || skipRewrite()) return false;
     const ctx = chatContext();
     const chat = Array.isArray(ctx?.chat) ? ctx.chat : null;
     if (!chat) return false;
-    let repaired = 0;
+    let patched = 0;
+    let missed = 0;
     document.querySelectorAll('#chat .mes').forEach((mes) => {
         const text = mes.querySelector('.mes_text');
         if (!text || text.tagName !== 'DIV' || text.querySelector('#curEditTextarea')) return;
-        if (text.querySelector(VOICE_NODE)) return;
-        const id = Number(mes.getAttribute('mesid'));
-        const entry = Number.isInteger(id) ? chat[id] : null;
-        if (!entry) return;
-        const raw = rawOf(entry);
-        if (!looksLikeVoice(raw)) return;
-        const next = rawTtsHtml(raw, entry, id);
-        if (!next || next === text.innerHTML) return;
-        text.innerHTML = next;
-        repaired += 1;
+        const result = patchMesText(text, Number(mes.getAttribute('mesid')), chat);
+        patched += result.patched;
+        missed += result.missed;
     });
-    if (repaired && !repairLogged) {
+    if (!repairLogged && patched) {
         repairLogged = true;
-        console.warn(`[tts-afterdrought] 格式化钩子没把控件画进正文，已用兜底重画 ${repaired} 楼`);
+        console.debug(`[tts-afterdrought] 补画控件 ${patched} 句（文本节点级 patch）`);
     }
-    return repaired > 0;
-}
-
-// 从一段 HTML 里取出所有控件的缓存键：只比状态属性的话，ready/error/waiting 的来回会一直被当成「正文变了」。
-function voiceKeysOf(html) {
-    return (String(html).match(/data-key="[^"]*"/g) || []).join('\u0001');
+    if (!repairLogged && missed) {
+        repairLogged = true;
+        // 这条是「本该有气泡却没有」的信号，保留 warning，别埋进 debug。
+        console.warn(`[tts-afterdrought] 有 ${missed} 处语音标记没能补画：正文里的标记串和原始消息对不上，已原样跳过`);
+    }
+    return patched > 0;
 }
 
 function scan() {
@@ -2052,23 +2276,11 @@ function scan() {
     let changed = false;
     const ctx = chatContext();
     const chat = Array.isArray(ctx?.chat) ? ctx.chat : null;
-    document.querySelectorAll(BUBBLE_ROOTS).forEach((node) => {
+    // 老酒馆没有格式化钩子：同样只做文本节点级的就地补画，绝不重写整楼。
+    document.querySelectorAll('#chat .mes_text').forEach((node) => {
         if (!node.isConnected || node.closest(VOICE_NODE) || node.querySelector?.('#curEditTextarea')) return;
-        // 带 <tts> 的楼层只能从原始消息重画，DOM 里的标签已经被酒馆剥掉了。
         const mesid = Number(node.closest('.mes')?.getAttribute('mesid'));
-        const entry = chat && Number.isInteger(mesid) ? chat[mesid] : null;
-        const raw = rawOf(entry);
-        if (!looksLikeVoice(raw)) return;
-        const next = rawTtsHtml(raw, entry, mesid);
-        if (!next) return;
-        // 只认当前 DOM：酒馆自己重画过（刷新楼层、切 swipe）之后，气泡就没了，
-        // 这时再拿缓存跳过重画，正文会一直停在剥完标签的样子。
-        if (next === node.innerHTML) return;
-        // 同一批台词已经在正文里了，差别只在状态：重写会把失败的气泡改回 waiting，
-        // 下一轮扫描又入队一次，合成失败（或网关慢）时就成了每隔 120ms 重发请求的死循环。
-        if (voiceKeysOf(next) === voiceKeysOf(node.innerHTML)) return;
-        node.innerHTML = next;
-        changed = true;
+        if (patchMesText(node, mesid, chat).patched) changed = true;
     });
     if (changed) {
         const autoplay = playNewReply;
@@ -2294,38 +2506,20 @@ function chatContext() {
     }
 }
 
-function refreshRenderedMessages() {
+// drawPlain 只给启动用：钩子装上之前，历史楼已经由酒馆渲染过一次，正文里只剩剥掉标签的
+// 裸文字，只能整楼重画一遍。用户切开关/切渲染方式时绝不能走那条路——那时正文里已经挂着
+// 别的扩展注入的折叠块、前端卡、iframe，innerHTML 一写就全没了。
+function refreshRenderedMessages({ drawPlain = false } = {}) {
     if (refreshing) return;
     refreshing = true;
     try {
-        const ctx = chatContext();
-        const chat = Array.isArray(ctx?.chat) ? ctx.chat : null;
-        if (chat && typeof ctx.messageFormatting === 'function') {
-            document.querySelectorAll('#chat .mes').forEach((mes) => {
-                const text = mes.querySelector('.mes_text');
-                const id = Number(mes.getAttribute('mesid'));
-                const entry = chat[id];
-                if (!text || text.tagName !== 'DIV' || text.querySelector('#curEditTextarea')) return;
-                if (!entry || typeof entry.mes !== 'string') return;
-                // 开着的时候只重画带语音标记的楼层：别的扩展往正文里挂的东西不该被整条重写掉。
-                if (enabled() && !looksLikeVoice(rawOf(entry))) return;
-                try {
-                    // 关掉扩展后不再改写正文，<tts> 标签要自己收干净，只留读者该看的那句。
-                    // 收在格式化之前做：格式化会把未知标签连同标签里的文字一起剥掉，剥完就分不清哪句是台词了。
-                    const source = enabled() ? rawOf(entry) : humanizeTtsTags(rawOf(entry));
-                    const html = ctx.messageFormatting(
-                        source,
-                        entry.name || '',
-                        !!entry.is_system,
-                        !!entry.is_user,
-                        id,
-                        {},
-                        false,
-                    );
-                    text.innerHTML = html;
-                } catch { /* 这条还原失败就留着现有正文 */ }
-            });
+        if (enabled()) {
+            reviveKeptVoices();
+            recastVoices(renderMode());
+        } else {
+            document.querySelectorAll(`#chat ${VOICE_NODE}`).forEach(releaseVoiceNode);
         }
+        if (drawPlain) reclaimPlainMessages();
         scan();
     } finally {
         refreshing = false;
@@ -2457,7 +2651,8 @@ function commitSettings(patch) {
     } else if (patch.enabled === true) {
         loadGatewayCharacters();
         loadEmotionNames();
-        if (!skipRewrite()) scan();
+        // 再开时不能只 scan：关闭期间控件已经退回纯文本，得先按节点把控件还原回来。
+        if (!skipRewrite()) refreshRenderedMessages();
         else mountFullButtons();
     } else if (patch.playback) {
         mountFullButtons();
@@ -3398,12 +3593,20 @@ function init() {
         cancelRemote(stale);
         speechAbort.abort();
     });
-    const observer = new MutationObserver(scheduleScan);
+    // 只盯聊天区：自己写播放条、设置面板不该触发全量扫描。
+    // patch 本身是幂等的（楼里有控件就短路），所以就算自己画的控件引发一轮扫描也不会再改 DOM。
+    const observer = new MutationObserver((mutations) => {
+        const inChat = mutations.some((mutation) => {
+            const node = mutation.target.nodeType === Node.ELEMENT_NODE ? mutation.target : mutation.target.parentElement;
+            return node?.closest?.('#chat');
+        });
+        if (inChat) scheduleScan();
+    });
     observer.observe(document.body, { childList: true, subtree: true, characterData: true });
     // 钩子先装：装完让酒馆把已有楼层重画一遍，历史消息也能拿到气泡。
     ensureFormatterHooks();
     logSelfCheck();
-    if (formatterHooked) refreshRenderedMessages();
+    if (formatterHooked) refreshRenderedMessages({ drawPlain: true });
     else scan();
 
     if (event_types.GENERATION_ENDED) {
