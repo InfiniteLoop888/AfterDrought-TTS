@@ -56,6 +56,44 @@ export function segmentEmotion(director) {
     return 'default';
 }
 
+// 电话/心声：情绪字段开头的这个词只决定播放音效，不能送给网关（网关不认识它）。
+// 从 voice-fx.js 的 voiceEffect 搬过来，词表保持一致。
+const EFFECT_WORDS = [
+    ['inner', /心声|内心独白|内心|心里话|独白|inner ?voice|inner ?thoughts?/gi],
+    ['phone', /电话里|电话|通话|听筒|对讲机|over the phone|on the phone|phone call|telephone|phone/gi],
+];
+const EFFECT_EDGES = /^[\s·・|,，、:：/\\\-—_()（）【】\[\]「」『』]+|[\s·・|,，、:：/\\\-—_()（）【】\[\]「」『』]+$/g;
+
+export const EFFECT_LABELS = Object.freeze({ phone: '电话', inner: '心声' });
+
+/** {effect: 'phone' | 'inner' | '', emotion: 去掉标记词后真正送给网关的情绪} */
+export function voiceEffect(emotion) {
+    const raw = String(emotion ?? '');
+    let effect = '';
+    let rest = raw;
+    for (const [name, re] of EFFECT_WORDS) {
+        re.lastIndex = 0;
+        if (!re.test(rest)) continue;
+        if (!effect) effect = name;
+        re.lastIndex = 0;
+        rest = rest.replace(re, ' ');
+    }
+    if (!effect) return { effect: '', emotion: raw };
+    rest = rest.replace(/\s+/g, ' ').replace(EFFECT_EDGES, '').replace(/[·・]\s*[·・]+/g, '·').trim();
+    return { effect, emotion: rest || 'default' };
+}
+
+// 导演块是对象，JSON.stringify 的键序跟着模型写字的顺序变。
+// 缓存键必须只跟内容有关，所以先按键名排序再序列化。
+export function stableStringify(value) {
+    if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(',')}]`;
+    if (value && typeof value === 'object') {
+        const keys = Object.keys(value).sort();
+        return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(',')}}`;
+    }
+    return JSON.stringify(value ?? null);
+}
+
 export function splitSentences(text) {
     const parts = [];
     const opens = '“「『';

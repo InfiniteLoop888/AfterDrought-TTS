@@ -4,6 +4,103 @@
 const BUFFER_LIMIT = 10;
 const BLOB_LIMIT = 24;
 
+// ---------- 电话 / 心声：从 voice-fx.js 搬过来的两条音效链 ----------
+// 房间噪声每条 AudioContext 只生成一次，2.4 秒的尾巴按左/右声道各抖一点。
+const rooms = new WeakMap();
+
+function roomBuffer(ctx, seconds = 2.4) {
+    const cached = rooms.get(ctx);
+    if (cached) return cached;
+    const length = Math.max(1, Math.round(ctx.sampleRate * seconds));
+    const buffer = ctx.createBuffer(2, length, ctx.sampleRate);
+    for (let channel = 0; channel < 2; channel += 1) {
+        const data = buffer.getChannelData(channel);
+        for (let i = 0; i < length; i += 1) {
+            data[i] = (Math.random() * 2 - 1) * (1 - i / length) ** 3.2;
+        }
+    }
+    rooms.set(ctx, buffer);
+    return buffer;
+}
+
+function crunchCurve(amount) {
+    const size = 1024;
+    const curve = new Float32Array(size);
+    for (let i = 0; i < size; i += 1) {
+        const x = (i / (size - 1)) * 2 - 1;
+        curve[i] = ((1 + amount) * x) / (1 + amount * Math.abs(x));
+    }
+    return curve;
+}
+
+function makeFilter(ctx, type, frequency, Q = 0.7, dbGain = 0) {
+    const node = ctx.createBiquadFilter();
+    node.type = type;
+    node.frequency.value = frequency;
+    node.Q.value = Q;
+    node.gain.value = dbGain;
+    return node;
+}
+
+function makeLevel(ctx, value) {
+    const node = ctx.createGain();
+    node.gain.value = value;
+    return node;
+}
+
+// {input, tail, dispose()}：句子先过这条链，再进总音量节点。没有音效时返回 null。
+export function effectChain(ctx, effect, out) {
+    if (!ctx || !out || (effect !== 'phone' && effect !== 'inner')) return null;
+    const nodes = [];
+    const add = (node) => { nodes.push(node); return node; };
+    const link = (...list) => {
+        for (let i = 0; i < list.length - 1; i += 1) list[i].connect(list[i + 1]);
+        return list[0];
+    };
+    let input;
+    let tail = 0;
+    if (effect === 'phone') {
+        // 听筒：没有低频和高频，中频顶出来，再加一点粗糙。
+        const shaper = add(ctx.createWaveShaper());
+        shaper.curve = crunchCurve(4);
+        shaper.oversample = '2x';
+        input = link(
+            add(makeFilter(ctx, 'highpass', 380, 0.9)),
+            add(makeFilter(ctx, 'highpass', 380, 0.9)),
+            add(makeFilter(ctx, 'peaking', 1700, 1.1, 6)),
+            shaper,
+            add(makeFilter(ctx, 'lowpass', 3300, 1)),
+            add(makeFilter(ctx, 'lowpass', 3300, 1)),
+            add(makeLevel(ctx, 0.8)),
+            out,
+        );
+    } else {
+        // 心声：贴近、柔和，外面裹一层不太真实的房间。
+        input = add(makeLevel(ctx, 1));
+        const dry = add(makeLevel(ctx, 0.72));
+        const delay = add(ctx.createDelay(0.2));
+        const verb = add(ctx.createConvolver());
+        const wet = add(makeLevel(ctx, 0.55));
+        delay.delayTime.value = 0.035;
+        verb.buffer = roomBuffer(ctx);
+        link(input, add(makeFilter(ctx, 'lowpass', 7000, 0.6)), dry, out);
+        link(input, delay, verb, add(makeFilter(ctx, 'highpass', 250, 0.7)), add(makeFilter(ctx, 'lowpass', 4200, 0.7)), wet, out);
+        tail = 2.6;
+    }
+    let gone = false;
+    return {
+        input,
+        tail,
+        dispose() {
+            if (gone) return;
+            gone = true;
+            for (const node of nodes) {
+                try { node.disconnect(); } catch { /* 已经断开 */ }
+            }
+        },
+    };
+}
+
 export class VoiceEngine {
     constructor() {
         this.ctx = null;
@@ -14,7 +111,12 @@ export class VoiceEngine {
         this.current = null;
         this.paused = false;
         this.volume = 1;
+        this.rate = 1;
         this.sequence = 0;
+        this.clock = null;
+        this.tailTimer = 0;
+        // 播放进度回调（字幕条 / 逐句高亮用），由调用方挂。
+        this.onProgress = null;
     }
 
     get currentKey() {
@@ -39,6 +141,12 @@ export class VoiceEngine {
         this.volume = Math.max(0, Math.min(1, Number(value)));
         if (Number.isNaN(this.volume)) this.volume = 1;
         if (this.gain) this.gain.gain.value = this.volume;
+    }
+
+    // 只改即将播放的句子。正在播的那句等下一句生效，避免播到一半变速。
+    setRate(value) {
+        this.rate = Math.max(0.5, Math.min(2, Number(value)));
+        if (Number.isNaN(this.rate)) this.rate = 1;
     }
 
     setBlob(key, blob) {
@@ -83,21 +191,66 @@ export class VoiceEngine {
         this.buffer(key, url).catch(() => { /* 预解码失败就算了，播放时还有一次机会 */ });
     }
 
-    begin(buffer, key, offset, resolve) {
+    // 当前时间 / 总时长，字幕条和逐句进度都从这一份算。
+    snapshot() {
+        if (!this.current) return null;
+        const rate = this.current.rate || 1;
+        const duration = Number(this.current.buffer.duration) || 0;
+        const played = this.current.offset + Math.max(0, (this.ctx.currentTime - this.current.startedAt) * rate);
+        return {
+            key: this.current.key,
+            time: Math.min(played, duration),
+            duration,
+            progress: duration ? Math.min(1, played / duration) : 0,
+        };
+    }
+
+    emitProgress() {
+        if (!this.onProgress) return;
+        const snapshot = this.snapshot();
+        if (!snapshot || this.paused) return;
+        try {
+            this.onProgress(snapshot);
+        } catch { /* 回调出错不影响播放 */ }
+    }
+
+    // 200ms 一次够字幕和进度条用了，比 rAF 省电，后台标签页也不会停。
+    startClock() {
+        this.stopClock();
+        this.emitProgress();
+        this.clock = setInterval(() => this.emitProgress(), 200);
+    }
+
+    stopClock() {
+        if (this.clock) clearInterval(this.clock);
+        this.clock = null;
+    }
+
+    begin(buffer, key, offset, resolve, effect = '') {
         const ctx = this.context();
         const source = ctx.createBufferSource();
         source.buffer = buffer;
+        source.playbackRate.value = this.rate;
         if (!this.gain) {
             this.gain = ctx.createGain();
             this.gain.connect(ctx.destination);
         }
         this.gain.gain.value = this.volume;
-        source.connect(this.gain);
+        let chain = null;
+        try {
+            chain = effectChain(ctx, effect, this.gain);
+        } catch { chain = null; }
+        if (chain) source.connect(chain.input);
+        else source.connect(this.gain);
         this.node = source;
         this.current = {
             key,
             buffer,
             offset,
+            rate: this.rate, // 记下起播时的语速，中途改了也不影响暂停点的换算
+            effect: chain ? effect : '',
+            chain,
+            tail: chain ? chain.tail : 0,
             startedAt: ctx.currentTime,
             resolve,
             done: false,
@@ -105,24 +258,37 @@ export class VoiceEngine {
         this.paused = false;
         source.onended = () => {
             if (this.node !== source) return; // 主动 pause/stop 时不算播完
+            // 心声的回响还在响，等尾巴散完再让下一句接上。
+            if (this.current && this.current.tail) {
+                clearTimeout(this.tailTimer);
+                this.tailTimer = setTimeout(() => {
+                    if (this.node === source) this.finish();
+                }, this.current.tail * 1000);
+                return;
+            }
             this.finish();
         };
         const duration = Number(buffer.duration) || 0;
         source.start(0, Math.max(0, Math.min(offset, Math.max(0, duration - 0.01))));
+        this.startClock();
     }
 
     finish() {
+        clearTimeout(this.tailTimer);
+        this.tailTimer = 0;
+        this.stopClock();
         const current = this.current;
         this.current = null;
         this.node = null;
         this.paused = false;
+        if (current && current.chain) current.chain.dispose();
         if (current && !current.done) {
             current.done = true;
             current.resolve();
         }
     }
 
-    async play(url, key) {
+    async play(url, key, options = {}) {
         this.stop();
         const seq = this.sequence;
         let buffer = null;
@@ -136,7 +302,7 @@ export class VoiceEngine {
         if (seq !== this.sequence) return true;
         await new Promise((resolve) => {
             try {
-                this.begin(buffer, key, 0, resolve);
+                this.begin(buffer, key, 0, resolve, options.effect || '');
             } catch {
                 resolve();
             }
@@ -147,8 +313,17 @@ export class VoiceEngine {
     pause() {
         if (!this.node || !this.current || this.paused) return false;
         const ctx = this.context();
-        const played = this.current.offset + Math.max(0, ctx.currentTime - this.current.startedAt);
+        // 变速播放时，实际播掉的是 elapsed * rate 秒的音频。
+        const rate = this.current.rate || 1;
+        const played = this.current.offset + Math.max(0, (ctx.currentTime - this.current.startedAt) * rate);
         this.current.offset = Math.min(played, this.current.buffer.duration || played);
+        if (this.current.chain) {
+            this.current.chain.dispose();
+            this.current.chain = null;
+        }
+        clearTimeout(this.tailTimer);
+        this.tailTimer = 0;
+        this.stopClock();
         this.node.onended = null;
         try { this.node.stop(); } catch { /* 已停止 */ }
         this.node = null;
@@ -158,10 +333,10 @@ export class VoiceEngine {
 
     resume() {
         if (!this.paused || !this.current) return false;
-        const { buffer, key, offset, resolve } = this.current;
+        const { buffer, key, offset, resolve, effect } = this.current;
         const seq = this.sequence;
         try {
-            this.begin(buffer, key, offset, resolve);
+            this.begin(buffer, key, offset, resolve, effect);
         } catch {
             return false;
         }
@@ -171,6 +346,9 @@ export class VoiceEngine {
 
     stop() {
         this.sequence += 1;
+        this.stopClock();
+        clearTimeout(this.tailTimer);
+        this.tailTimer = 0;
         const current = this.current;
         const node = this.node;
         this.node = null;
@@ -180,6 +358,7 @@ export class VoiceEngine {
             node.onended = null;
             try { node.stop(); } catch { /* 已经结束 */ }
         }
+        if (current && current.chain) current.chain.dispose();
         if (current && !current.done) {
             current.done = true;
             current.resolve();

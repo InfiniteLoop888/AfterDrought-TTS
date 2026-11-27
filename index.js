@@ -1,5 +1,5 @@
 import { eventSource, event_types, setExtensionPrompt, extension_prompt_types, extension_prompt_roles } from '../../../../script.js';
-import { parseDialogueLines, takeDirector, segmentText, splitSentences, visibleText } from './tad/parse.js';
+import { parseDialogueLines, takeDirector, segmentText, splitSentences, visibleText, voiceEffect, stableStringify } from './tad/parse.js';
 import { VoiceEngine } from './tad/audio.js';
 import { audioStore } from './tad/store.js';
 
@@ -110,7 +110,7 @@ function defaultSettings() {
     return {
         version: 2,
         prompt: { enabled: true, depth: 1, role: 'system', content: '', builtin: true },
-        playback: { scope: 'dialogue', compat: false, autoInfer: false, progressive: false, bufferSize: 5, volume: 1 },
+        playback: { scope: 'dialogue', compat: false, autoInfer: false, progressive: false, bufferSize: 5, volume: 1, rate: 1, follow: true, sfx: true },
         notify: { enabled: true, success: false, warning: true, error: true },
         regexFilters: [
             { enabled: true, regex: '/<think>[\\s\\S]*?<\\/think>\\n?/g', replacement: '' },
@@ -152,6 +152,9 @@ function loadSettings() {
     settings.playback.bufferSize = Math.max(1, Math.min(20, Number(settings.playback.bufferSize) || 5));
     settings.playback.volume = Math.max(0, Math.min(1, Number(settings.playback.volume)));
     if (Number.isNaN(settings.playback.volume)) settings.playback.volume = 1;
+    settings.playback.rate = Math.max(0.5, Math.min(2, Number(settings.playback.rate) || 1));
+    settings.playback.follow = settings.playback.follow !== false;
+    settings.playback.sfx = settings.playback.sfx !== false;
     if (!Array.isArray(settings.regexFilters)) settings.regexFilters = defaults.regexFilters;
     settings.version = 2;
     settingsCache = settings;
@@ -178,6 +181,10 @@ function playbackSettings() {
 
 function compatMode() {
     return playbackSettings().compat === true;
+}
+
+function effectsEnabled() {
+    return playbackSettings().sfx !== false;
 }
 
 function fullScope() {
@@ -422,11 +429,56 @@ function applyDialoguePrompt() {
 }
 
 function notify(level, message) {
+    notifyAction(level, message);
+}
+
+function notifyAction(level, message, action) {
     const config = loadSettings().notify;
     const category = level === 'info' ? 'success' : level;
     if (config.enabled === false || config[category] === false) return;
     const fn = globalThis.toastr?.[level];
-    if (typeof fn === 'function') fn(message);
+    if (typeof fn !== 'function') return;
+    // 带动作的提示加个点击重试，比只弹一行字有用。
+    if (action) fn(message, '', { onclick: action, timeOut: 12000, extendedTimeOut: 5000, closeButton: true });
+    else fn(message);
+}
+
+// 长消息里一句一句失败会刷屏。攒 400ms 合成一条，点一下整批重试。
+const failedNotifications = new Map();
+let failureTimer = 0;
+
+function flushFailures() {
+    failureTimer = 0;
+    const entries = [...failedNotifications.entries()];
+    failedNotifications.clear();
+    if (!entries.length) return;
+    const keys = entries.map(([key]) => key);
+    const retry = () => {
+        keys.forEach((key) => {
+            bubblesByKey(key).forEach((node) => {
+                if (node.dataset.status !== 'error') return;
+                node.dataset.status = 'waiting';
+                node.classList.remove('error');
+                delete node.title;
+                enqueue(node, { autoplay: node.dataset.autoplay === '1' });
+            });
+        });
+    };
+    const text = entries.length === 1
+        ? `${entries[0][1] || '配音失败'}（点击重试）`
+        : `${entries.length} 句配音失败（点击重试）`;
+    notifyAction('error', text, retry);
+}
+
+function reportFailure(key, message) {
+    const text = message || '配音失败';
+    if (!key) {
+        notify('error', text);
+        return;
+    }
+    failedNotifications.set(key, text);
+    clearTimeout(failureTimer);
+    failureTimer = setTimeout(flushFailures, 400);
 }
 
 function parseRegexString(regexStr) {
@@ -499,17 +551,23 @@ function bubbleKey(speaker, emotion, text, director = '') {
 }
 
 function voiceAttrs(speaker, emotion, text, settled, director) {
-    const directorText = director ? JSON.stringify(director) : '';
-    const key = bubbleKey(speaker, emotion, text, directorText);
+    // 导演块先按键名排序再序列化，模型换个键序不该多合成一遍。
+    const directorText = director ? stableStringify(director) : '';
+    // 「电话·开心」：标记词只决定播放音效，送给网关的情绪是后面的「开心」。
+    const spoken = voiceEffect(emotion);
+    const key = bubbleKey(speaker, spoken.emotion, text, directorText);
     const cached = memory.get(key) || '';
     const status = cached ? 'ready' : (pending.has(key) ? 'queued' : 'waiting');
     const loading = status === 'queued' ? ' loading' : '';
     const url = cached ? ` data-audio-url="${escapeHtmlAttr(cached)}"` : '';
     const settledAttr = settled ? '' : ' data-settled="0"';
     const directorAttr = directorText ? ` data-director="${escapeHtmlAttr(directorText)}"` : '';
-    const label = emotion && emotion !== 'default' ? `播放 ${speaker} · ${emotion}` : `播放 ${speaker}`;
+    const effectAttr = spoken.effect ? ` data-effect="${spoken.effect}"` : '';
+    const effectName = spoken.effect === 'phone' ? '电话' : (spoken.effect === 'inner' ? '心声' : '');
+    const shownEmotion = spoken.emotion && spoken.emotion !== 'default' ? ` · ${spoken.emotion}` : '';
+    const label = `播放 ${speaker}${shownEmotion}${effectName ? `（${effectName}音效）` : ''}`;
     // 声波是 span，键盘和读屏都够不着。补上按钮语义和标签。
-    const attrs = ` role="button" tabindex="0" aria-label="${escapeHtmlAttr(label)}" data-status="${status}" data-key="${escapeHtmlAttr(key)}"${url} data-text="${escapeHtmlAttr(text)}" data-voice-name="${escapeHtmlAttr(speaker)}" data-voice-emotion="${escapeHtmlAttr(emotion)}"${settledAttr}${directorAttr}`;
+    const attrs = ` role="button" tabindex="0" aria-label="${escapeHtmlAttr(label)}" data-status="${status}" data-key="${escapeHtmlAttr(key)}"${url} data-text="${escapeHtmlAttr(text)}" data-voice-name="${escapeHtmlAttr(speaker)}" data-voice-emotion="${escapeHtmlAttr(spoken.emotion)}"${effectAttr}${settledAttr}${directorAttr}`;
     return { loading, attrs };
 }
 
@@ -517,7 +575,13 @@ function buildBubbleHtml(speaker, emotion, text, settled = true, director = null
     const state = voiceAttrs(speaker, emotion, text, settled, director);
     const width = Math.min(220, 60 + Math.max(2, Math.ceil(text.length * 0.25)) * 10);
     const seconds = Math.max(2, Math.ceil(text.length * 0.25));
-    return `<span class="voice-bubble tad-voice${state.loading}" style="width: ${width}px"${state.attrs}>${BARS_HTML}<span class="sovits-voice-duration">${seconds}&quot;</span></span>`;
+    // 气泡只显示声波和大致时长，长句不好分辨，用 title 补上说话人和台词开头。
+    const excerpt = text.length > 40 ? `${text.slice(0, 40)}…` : text;
+    const spoken = voiceEffect(emotion);
+    const effectName = spoken.effect === 'phone' ? '电话' : (spoken.effect === 'inner' ? '心声' : '');
+    const shown = spoken.emotion && spoken.emotion !== 'default' ? ` · ${spoken.emotion}` : '';
+    const tip = `${speaker}${shown}${effectName ? `（${effectName}）` : ''}：${excerpt}`;
+    return `<span class="voice-bubble tad-voice${state.loading}" style="width: ${width}px"${state.attrs} title="${escapeHtmlAttr(tip)}">${BARS_HTML}<span class="sovits-voice-duration">${seconds}&quot;</span></span>`;
 }
 
 function spokenColor(html) {
@@ -532,7 +596,9 @@ function presentDialogue(text) {
 
 function buildLineHtml(speaker, emotion, text, settled = true, director = null) {
     const state = voiceAttrs(speaker, emotion, text, settled, director);
-    const title = emotion && emotion !== 'default' ? `${speaker} · ${emotion}` : speaker;
+    const spoken = voiceEffect(emotion);
+    const effectName = spoken.effect === 'phone' ? '电话' : (spoken.effect === 'inner' ? '心声' : '');
+    const title = `${speaker}${spoken.emotion && spoken.emotion !== 'default' ? ` · ${spoken.emotion}` : ''}${effectName ? `（${effectName}）` : ''}`;
     return `<span class="tad-line tad-voice${state.loading}"${state.attrs} title="${escapeHtmlAttr(title)}"><span class="tad-line-body">${escapeHtmlAttr(presentDialogue(text))}</span><span class="tad-line-mark">${BARS_HTML}</span></span>`;
 }
 
@@ -792,6 +858,7 @@ function stopPlayback() {
         audio = null;
     }
     notifyQueueChange();
+    hidePlayer();
     document.querySelectorAll(VOICE_NODE).forEach((node) => {
         node.classList.remove('playing', 'loading', 'paused');
         delete node.dataset.autoplay;
@@ -943,6 +1010,8 @@ async function requestAudio(segment, requestId, signal) {
         blob,
         speaker: segment.speaker,
         emotion: segment.emotion || 'default',
+        effect: segment.effect || '',
+        director: segment.director || null,
         text: segment.text,
         timestamp: Date.now(),
     }).then(() => pruneAudioStore()).catch(async (error) => {
@@ -957,18 +1026,28 @@ async function requestAudio(segment, requestId, signal) {
     return url;
 }
 
-async function playUrl(url, key = '') {
+async function playUrl(url, key = '', effect = '') {
     if (!url) return;
     let handled = false;
     try {
-        handled = await voiceEngine.play(url, key || url);
+        handled = await voiceEngine.play(url, key || url, { effect: effectsEnabled() ? effect : '' });
     } catch {
         handled = false;
     }
     if (handled) return;
-    // 没有 WebAudio 或解码失败时退回原来的 <audio>。
+    // 没有 WebAudio 或解码失败时退回原来的 <audio>。音效链依赖 WebAudio，这里只保底出声。
     if (audio) audio.pause();
     const next = new Audio(url);
+    next.playbackRate = voiceEngine.rate;
+    next.addEventListener('timeupdate', () => {
+        const duration = Number.isFinite(next.duration) ? next.duration : 0;
+        paintProgress({
+            key,
+            time: next.currentTime,
+            duration,
+            progress: duration ? Math.min(1, next.currentTime / duration) : 0,
+        });
+    });
     audio = next;
     await new Promise((resolve) => {
         const finish = () => {
@@ -986,6 +1065,181 @@ function bubblesByKey(key) {
     return [...document.querySelectorAll(`#chat ${VOICE_NODE}`)].filter((btn) => btn.dataset.key === key);
 }
 
+function effectOfKey(key) {
+    return bubblesByKey(key)[0]?.dataset.effect || '';
+}
+
+// ---------- 迷你播放条：当前句字幕 + 逐句进度 ----------
+// playList 是「这次朗读的句子顺序」，上一句/下一句按它在里面挪；playPos 是当前句的下标。
+const playList = [];
+let playPos = -1;
+let liveKey = '';
+// 进度每 200ms 刷一次，别每次都全页扫一遍气泡，只记住当前这句的节点。
+let progressNodes = [];
+
+function playerBarNode() {
+    return document.querySelector('#tad-player');
+}
+
+function keyListOfMessage(node) {
+    const holder = node?.closest('.mes_text') || node?.closest('.mes');
+    if (!holder) return node?.dataset.key ? [node.dataset.key] : [];
+    return [...holder.querySelectorAll(VOICE_NODE)].map((item) => item.dataset.key);
+}
+
+function setPlayList(keys) {
+    const list = (Array.isArray(keys) ? keys : []).filter((key) => !!key);
+    playList.splice(0, playList.length, ...[...new Set(list)]);
+    playPos = -1;
+}
+
+function clockText(seconds) {
+    const total = Math.max(0, Math.round(Number(seconds) || 0));
+    return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
+}
+
+function playerLabel(node) {
+    if (!node) return '';
+    const speaker = node.dataset.voiceName || '';
+    const emotion = node.dataset.voiceEmotion && node.dataset.voiceEmotion !== 'default' ? ` · ${node.dataset.voiceEmotion}` : '';
+    const effect = node.dataset.effect === 'phone' ? '（电话）' : (node.dataset.effect === 'inner' ? '（心声）' : '');
+    return `${speaker}${emotion}${effect}`;
+}
+
+function queueNote() {
+    if (!playList.length || playPos < 0) return '';
+    const left = playList.length - playPos - 1;
+    return left > 0 ? `还有 ${left} 句` : '最后一句';
+}
+
+function syncPlayerPause() {
+    const bar = playerBarNode();
+    if (!bar) return;
+    const button = bar.querySelector('[data-tad-player="pause"]');
+    if (!button) return;
+    const playing = !!voiceEngine.current && !voiceEngine.paused;
+    button.textContent = playing ? '暂停' : '继续';
+    // <audio> 兜底没有暂停点，别给一个点了会跳句的按钮。
+    button.hidden = !voiceEngine.current;
+}
+
+function paintPlayerInfo(key) {
+    const bar = playerBarNode();
+    if (!bar) return;
+    const node = bubblesByKey(key)[0];
+    bar.querySelector('.tad-player-who').textContent = playerLabel(node);
+    bar.querySelector('.tad-player-text').textContent = node?.dataset.text || '';
+    bar.querySelector('[data-tad-player="queue"]').textContent = queueNote();
+    syncPlayerPause();
+}
+
+function showPlayer(key) {
+    if (key) liveKey = key;
+    if (!liveKey) return;
+    playPos = playList.indexOf(liveKey);
+    progressNodes = bubblesByKey(liveKey);
+    const bar = playerBarNode();
+    if (bar) bar.hidden = false;
+    paintPlayerInfo(liveKey);
+    paintProgress({ key: liveKey, progress: 0 });
+}
+
+function hidePlayer() {
+    liveKey = '';
+    progressNodes.forEach((node) => node.style.removeProperty('--tad-progress'));
+    progressNodes = [];
+    const bar = playerBarNode();
+    if (bar) {
+        bar.hidden = true;
+        bar.style.setProperty('--tad-progress', '0%');
+    }
+}
+
+// 进度：播放条上一条线，当前句上也跟着走一格，算是逐句高亮。
+function paintProgress({ key = '', progress = 0, duration = 0, time = 0 } = {}) {
+    const pct = Math.max(0, Math.min(100, Math.round((Number(progress) || 0) * 100)));
+    const bar = playerBarNode();
+    if (bar) {
+        bar.style.setProperty('--tad-progress', `${pct}%`);
+        const clock = bar.querySelector('[data-tad-player="time"]');
+        if (clock) clock.textContent = duration ? `${clockText(time)} / ${clockText(duration)}` : '';
+    }
+    const target = key || liveKey;
+    if (!target) return;
+    if (target !== liveKey || !progressNodes.length) progressNodes = bubblesByKey(target);
+    progressNodes.forEach((node) => node.style.setProperty('--tad-progress', `${pct}%`));
+}
+
+function pauseCurrent() {
+    if (!voiceEngine.current || voiceEngine.paused) return false;
+    if (!voiceEngine.pause()) return false;
+    bubblesByKey(voiceEngine.currentKey).forEach((node) => {
+        node.classList.remove('playing');
+        node.classList.add('paused');
+    });
+    syncPlayerPause();
+    return true;
+}
+
+function resumeCurrent() {
+    if (!voiceEngine.paused || !voiceEngine.current) return false;
+    if (!voiceEngine.resume()) return false;
+    bubblesByKey(voiceEngine.currentKey).forEach((node) => {
+        node.classList.remove('paused');
+        node.classList.add('playing');
+    });
+    syncPlayerPause();
+    return true;
+}
+
+function togglePause() {
+    // 先认 WebAudio 的暂停点；退回 <audio> 时只能整体暂停。
+    if (voiceEngine.current) {
+        if (voiceEngine.paused) resumeCurrent();
+        else pauseCurrent();
+        return;
+    }
+    if (audio) {
+        // <audio> 兜底时没有「从暂停点续播」，空格就当停止。
+        stopPlayback();
+        return;
+    }
+    if (playList.length) stepPlay(1);
+}
+
+// 上一句/下一句：没生成好的那句交给「从这句继续」，把后面的句子一起排上。
+function stepPlay(delta) {
+    if (!playList.length || !delta) return;
+    const base = playPos >= 0 ? playPos : (delta > 0 ? -1 : playList.length);
+    const index = Math.max(0, Math.min(playList.length - 1, base + delta));
+    const key = playList[index];
+    const node = bubblesByKey(key)[0];
+    if (!node) return;
+    playPos = index;
+    if (node.dataset.status === 'ready') {
+        playBubble(node);
+        return;
+    }
+    playFromNode(node);
+}
+
+function bindPlayerBar(bar) {
+    const hit = (name, handler) => {
+        const button = bar.querySelector(`[data-tad-player="${name}"]`);
+        if (button) button.addEventListener('click', handler);
+    };
+    hit('prev', () => stepPlay(-1));
+    hit('next', () => stepPlay(1));
+    hit('pause', () => togglePause());
+    hit('close', () => stopPlayback());
+}
+
+function isTypingTarget(node) {
+    if (!node || node.nodeType !== 1) return false;
+    if (node.tagName === 'INPUT' || node.tagName === 'TEXTAREA' || node.tagName === 'SELECT') return true;
+    return node.isContentEditable === true;
+}
+
 function segmentFromButton(btn, autoplay) {
     let director = null;
     if (btn.dataset.director) {
@@ -995,6 +1249,7 @@ function segmentFromButton(btn, autoplay) {
         key: btn.dataset.key,
         speaker: btn.dataset.voiceName,
         emotion: btn.dataset.voiceEmotion || 'default',
+        effect: btn.dataset.effect || '',
         text: btn.dataset.text,
         director,
         fresh: btn.dataset.fresh === '1',
@@ -1074,20 +1329,11 @@ async function playBubble(btn) {
     if (!url) return;
     // 点正在播的这句 → 暂停；点暂停的这句 → 接着播，不再从头开始。
     if (voiceEngine.currentKey === key && !voiceEngine.paused) {
-        if (voiceEngine.pause()) {
-            bubblesByKey(key).forEach((node) => {
-                node.classList.remove('playing');
-                node.classList.add('paused');
-            });
-        }
+        pauseCurrent();
         return;
     }
     if (voiceEngine.paused && voiceEngine.currentKey === key) {
-        voiceEngine.resume();
-        bubblesByKey(key).forEach((node) => {
-            node.classList.remove('paused');
-            node.classList.add('playing');
-        });
+        resumeCurrent();
         return;
     }
     // 没有 WebAudio（或解码失败）时用的是 <audio>，暂停只能整体停掉。
@@ -1097,15 +1343,21 @@ async function playBubble(btn) {
     }
     const token = ++playToken;
     autoList.splice(0, autoList.length);
+    // 单句点击也要有上一句/下一句：按同一条消息里的气泡顺序建列表。
+    if (!playList.includes(key)) setPlayList(keyListOfMessage(btn));
+    playPos = playList.indexOf(key);
     const same = bubblesByKey(key);
     document.querySelectorAll(`${VOICE_NODE}.playing, ${VOICE_NODE}.paused`).forEach((node) => {
         node.classList.remove('playing', 'paused');
     });
     same.forEach((node) => node.classList.add('playing'));
-    await playUrl(url, key);
+    revealNode(same[0]);
+    showPlayer(key);
+    await playUrl(url, key, btn.dataset.effect || '');
     if (token === playToken) {
         same.forEach((node) => node.classList.remove('playing', 'paused'));
         markPlayed(key);
+        hidePlayer();
     }
 }
 
@@ -1152,7 +1404,9 @@ async function drainAutoplay() {
                 node.classList.remove('playing', 'paused');
             });
             same.forEach((node) => node.classList.add('playing'));
-            await playUrl(memory.get(key), key);
+            revealNode(same[0]);
+            showPlayer(key);
+            await playUrl(memory.get(key), key, effectOfKey(key));
             if (token === playToken) {
                 same.forEach((node) => node.classList.remove('playing', 'paused'));
                 markPlayed(key);
@@ -1164,7 +1418,10 @@ async function drainAutoplay() {
     } finally {
         draining = false;
         if (autoList.length && token === playToken) considerDrain();
-        else if (token === playToken) readingMes = null;
+        else if (token === playToken) {
+            readingMes = null;
+            hidePlayer();
+        }
     }
 }
 
@@ -1201,7 +1458,7 @@ async function pump() {
                     node.classList.add('error');
                     node.title = message;
                 });
-                notify('error', message);
+                reportFailure(key, message);
             } finally {
                 pending.delete(key);
                 notifyQueueChange();
@@ -1238,6 +1495,7 @@ function segmentsFromPlain(text) {
             key: node.dataset.key,
             speaker: node.dataset.voiceName,
             emotion: node.dataset.voiceEmotion || 'default',
+            effect: node.dataset.effect || '',
             text: node.dataset.text,
             director,
             fresh: false,
@@ -1291,6 +1549,8 @@ function queueMessage(mes, autoplay, full = false) {
         return;
     }
     readingMes = mes;
+    // 整楼连播时先记下句子顺序，播放条才能上一句/下一句。
+    setPlayList(segments.map((segment) => segment.key));
     segments.forEach((segment) => enqueueSegment({ ...segment, autoplay: !!autoplay }));
 }
 
@@ -1393,6 +1653,7 @@ function playFromNode(btn) {
     const from = nodes.indexOf(btn);
     if (from < 0) return;
     stopPlayback();
+    setPlayList(nodes.map((node) => node.dataset.key));
     nodes.slice(from).forEach((node) => {
         let director = null;
         if (node.dataset.director) {
@@ -1402,6 +1663,7 @@ function playFromNode(btn) {
             key: node.dataset.key,
             speaker: node.dataset.voiceName,
             emotion: node.dataset.voiceEmotion || 'default',
+            effect: node.dataset.effect || '',
             text: node.dataset.text,
             director,
             fresh: false,
@@ -1410,14 +1672,45 @@ function playFromNode(btn) {
     });
 }
 
-function downloadBubble(btn) {
+// 网关可能回 wav，也可能回 mp3/ogg。按文件头判断真实编码，文件名后缀别再说谎。
+async function sniffAudioExt(blob) {
+    try {
+        const head = new Uint8Array(await blob.slice(0, 12).arrayBuffer());
+        const ascii = (start, end) => String.fromCharCode(...head.slice(start, end));
+        if (ascii(0, 4) === 'RIFF') return 'wav';
+        if (ascii(0, 4) === 'OggS') return 'ogg';
+        if (ascii(0, 4) === 'fLaC') return 'flac';
+        if (ascii(0, 4) === 'FORM') return 'aiff';
+        if (ascii(4, 8) === 'ftyp') return 'm4a';
+        if (ascii(0, 3) === 'ID3') return 'mp3';
+        if (head[0] === 0xff && (head[1] & 0xe0) === 0xe0) return 'mp3';
+    } catch { /* 读不出文件头就按 wav 兜底 */ }
+    return 'wav';
+}
+
+async function downloadBubble(btn) {
     const url = btn?.dataset.audioUrl;
     if (!url) return;
-    const link = document.createElement('a');
     const speaker = btn.dataset.voiceName || 'voice';
-    link.href = url;
-    link.download = `${speaker}.wav`;
+    let blob = null;
+    try {
+        blob = await (await fetch(url)).blob();
+    } catch {
+        blob = null;
+    }
+    if (!blob || !blob.size) {
+        notify('error', '这段语音已经取不到了，重新生成一次');
+        return;
+    }
+    const ext = await sniffAudioExt(blob);
+    const emotion = btn.dataset.voiceEmotion || 'default';
+    const name = `[${safeFilePart(speaker)}]_[${safeFilePart(emotion)}]_${safeFilePart(btn.dataset.text)}_${await shortHash(btn.dataset.key || url)}.${ext}`;
+    const href = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = href;
+    link.download = name;
     link.click();
+    setTimeout(() => URL.revokeObjectURL(href), 30000);
 }
 
 function bindBubbleMenu() {
@@ -1619,6 +1912,10 @@ function paintControls() {
     setValue('buffer', settings.playback.bufferSize || 5);
     setValue('volume', settings.playback.volume ?? 1);
     voiceEngine.setVolume(settings.playback.volume ?? 1);
+    setValue('rate', settings.playback.rate ?? 1);
+    voiceEngine.setRate(settings.playback.rate ?? 1);
+    setValue('follow', settings.playback.follow !== false);
+    setValue('sfx', settings.playback.sfx !== false);
     setValue('notify-enabled', settings.notify.enabled !== false);
     setValue('notify-success', settings.notify.success === true);
     setValue('notify-warning', settings.notify.warning !== false);
@@ -1664,6 +1961,8 @@ function commitSettings(patch) {
         settings.playback.bufferSize = Math.max(1, Math.min(20, Number(settings.playback.bufferSize) || 5));
         settings.playback.volume = Math.max(0, Math.min(1, Number(settings.playback.volume)));
         if (Number.isNaN(settings.playback.volume)) settings.playback.volume = 1;
+        settings.playback.rate = Math.max(0.5, Math.min(2, Number(settings.playback.rate) || 1));
+        settings.playback.follow = settings.playback.follow !== false;
         if (patch.playback.compat !== undefined || patch.playback.scope !== undefined) refreshView = true;
     }
     if (patch.notify) Object.assign(settings.notify, patch.notify);
@@ -1793,7 +2092,8 @@ async function ensureFolderPermission() {
 }
 
 function safeFilePart(value) {
-    return String(value || 'voice').replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').slice(0, 40) || 'voice';
+    // 方括号是文件名里的分隔符，正文里出现也要换掉，不然导入时切不回去。
+    return String(value || 'voice').replace(/[<>:"/\\|?*[\]\u0000-\u001f]/g, '_').slice(0, 40) || 'voice';
 }
 
 async function shortHash(text) {
@@ -1815,7 +2115,9 @@ async function exportCache() {
     const manifest = [];
     for (const item of items) {
         if (!item?.blob || !item.key) continue;
-        const file = `[${safeFilePart(item.speaker)}]_${safeFilePart(item.text)}_${await shortHash(item.key)}.wav`;
+        // 按真实编码命名，wav/mp3/ogg 各归各位。
+        const ext = await sniffAudioExt(item.blob);
+        const file = `[${safeFilePart(item.speaker)}]_[${safeFilePart(item.emotion || 'default')}]_${safeFilePart(item.text)}_${await shortHash(item.key)}.${ext}`;
         const handle = await folderHandle.getFileHandle(file, { create: true });
         const writable = await handle.createWritable();
         await writable.write(item.blob);
@@ -1823,9 +2125,12 @@ async function exportCache() {
         manifest.push({
             key: item.key,
             speaker: item.speaker,
-            emotion: item.emotion,
+            emotion: item.emotion || 'default',
+            effect: item.effect || '',
+            director: item.director || null,
             text: item.text,
             file,
+            ext,
         });
     }
     const manifestHandle = await folderHandle.getFileHandle('afterdrought-tts.json', { create: true });
@@ -1863,6 +2168,8 @@ async function importCache() {
                 blob: file,
                 speaker: item.speaker,
                 emotion: item.emotion || 'default',
+                effect: item.effect || '',
+                director: item.director || null,
                 text: item.text,
                 timestamp: Date.now(),
             });
@@ -1870,19 +2177,38 @@ async function importCache() {
             imported += 1;
         }
     } catch { /* 没有清单时继续按文件名导入 */ }
-    // 带方括号的是现在导出的名字，不带的是旧版导出的名字，两种都认。
-    const nameRe = /^\[?(.*?)\]?_(.+)_([a-f0-9]{6,})\.(wav|mp3|ogg)$/i;
+    // 文件名：[角色]_[情绪]_台词_哈希.ext；旧版没有情绪那一段，两种都认。
+    const fileRe = /^\[(.*?)\]_(?:\[(.*?)\]_)?(.*)_([a-f0-9]{8,})\.([a-z0-9]{2,5})$/i;
+    const oldRe = /^(.*?)_(.*)_([a-f0-9]{8,})\.([a-z0-9]{2,5})$/i;
+    const liveNodes = [...document.querySelectorAll(`#chat ${VOICE_NODE}`)];
     for await (const [name, handle] of folderHandle.entries()) {
-        if (handle.kind !== 'file' || seen.has(name) || !nameRe.test(name)) continue;
-        const match = name.match(nameRe);
+        if (handle.kind !== 'file' || seen.has(name)) continue;
+        const match = name.match(fileRe) || name.match(oldRe);
+        if (!match) continue;
+        const bracketed = match.length === 6;
+        // 旧版名字 `[角色]_文本_哈希` 也会落进带情绪的括号分组里，这时第二段是空的。
+        const hasEmotion = bracketed && typeof match[2] === 'string';
         const speaker = match[1].trim() || 'Imported';
-        const text = match[2].trim();
+        const emotion = hasEmotion ? (match[2].trim() || 'default') : 'default';
+        const text = (bracketed ? match[3] : match[2]).trim();
+        if (!text) continue;
         const file = await handle.getFile();
+        // 页面上还挂着同一句时用它的 key：情绪和导演块都在里面，别硬塞 default。
+        const node = liveNodes.find((item) => item.dataset.text === text && item.dataset.voiceName === speaker)
+            || liveNodes.find((item) => item.dataset.text === text);
+        let director = null;
+        if (node?.dataset.director) {
+            try { director = JSON.parse(node.dataset.director); } catch { director = null; }
+        }
+        const finalSpeaker = node?.dataset.voiceName || speaker;
+        const finalEmotion = node?.dataset.voiceEmotion || emotion;
         await audioStore.put({
-            key: bubbleKey(speaker, 'default', text, ''),
+            key: node?.dataset.key || bubbleKey(finalSpeaker, finalEmotion, text, director ? stableStringify(director) : ''),
             blob: file,
-            speaker,
-            emotion: 'default',
+            speaker: finalSpeaker,
+            emotion: finalEmotion,
+            effect: node?.dataset.effect || '',
+            director,
             text,
             timestamp: Date.now(),
         });
@@ -2127,6 +2453,8 @@ function playbackModule() {
     switches.append(
         switchRow('边生成边播放', 'progressive'),
         switchRow('前端卡兼容', 'compat'),
+        switchRow('朗读时跟随滚动', 'follow'),
+        switchRow('电话/心声音效', 'sfx'),
     );
     const bufferLabel = document.createElement('label');
     bufferLabel.className = 'tad-field';
@@ -2140,13 +2468,15 @@ function playbackModule() {
     bufferLabel.append(buffer);
     const note = document.createElement('div');
     note.className = 'tad-hint';
-    note.textContent = '「边生成边播放」攒到缓冲句数就开播，缓冲越小起播越快、越容易断。前端卡兼容不改写正文，只在前端卡上按整条消息读。';
+    note.textContent = '「边生成边播放」攒到缓冲句数就开播，缓冲越小起播越快、越容易断。前端卡兼容不改写正文，只在前端卡上按整条消息读。播放中空格暂停/继续，左右方向键换句，Esc 停止。';
     switches.addEventListener('change', (event) => {
         const input = event.target;
         if (!(input instanceof HTMLInputElement)) return;
         const map = {
             progressive: () => commitSettings({ playback: { progressive: input.checked } }),
             compat: () => commitSettings({ playback: { compat: input.checked } }),
+            follow: () => commitSettings({ playback: { follow: input.checked } }),
+            sfx: () => commitSettings({ playback: { sfx: input.checked } }),
         };
         map[input.dataset.tad]?.();
     });
@@ -2165,7 +2495,21 @@ function playbackModule() {
     volume.addEventListener('input', () => voiceEngine.setVolume(Number(volume.value)));
     volume.addEventListener('change', () => commitSettings({ playback: { volume: Math.max(0, Math.min(1, Number(volume.value))) } }));
 
-    box.append(switches, bufferLabel, volumeLabel, note);
+    const rateLabel = document.createElement('label');
+    rateLabel.className = 'tad-field';
+    rateLabel.append(document.createTextNode('语速'));
+    const rate = document.createElement('input');
+    rate.type = 'range';
+    rate.min = '0.5';
+    rate.max = '2';
+    rate.step = '0.05';
+    rate.dataset.tad = 'rate';
+    rateLabel.append(rate);
+    // 拖动时只调引擎，松手才写设置，免得每帧都落一次 localStorage。
+    rate.addEventListener('input', () => voiceEngine.setRate(Number(rate.value)));
+    rate.addEventListener('change', () => commitSettings({ playback: { rate: Number(rate.value) } }));
+
+    box.append(switches, bufferLabel, volumeLabel, rateLabel, note);
     return box;
 }
 
@@ -2417,10 +2761,55 @@ function buildShell() {
     overlay.append(sheet);
     overlay.addEventListener('click', closeSheetFromBackdrop);
     document.addEventListener('keydown', (event) => {
-        if (event.key === 'Escape') closeSheet();
+        if (event.key !== 'Escape') return;
+        if (!overlay.hidden) {
+            closeSheet();
+            return;
+        }
+        // 面板没开时，Esc 当成「停止」：正在放或队列里还有句子就一起清掉。
+        if (voiceEngine.current || audio || autoList.length) {
+            stopPlayback();
+            notify('info', '已停止朗读');
+        }
     });
 
-    document.body.append(fab, overlay);
+    // 迷你播放条：贴左下角，播放时才出现，显示当前句字幕和进度。
+    const player = document.createElement('div');
+    player.id = 'tad-player';
+    player.hidden = true;
+    player.innerHTML = `
+        <div class="tad-player-head">
+            <span class="tad-player-who"></span>
+            <span class="tad-player-time" data-tad-player="time"></span>
+            <span class="tad-player-queue" data-tad-player="queue"></span>
+        </div>
+        <div class="tad-player-text"></div>
+        <div class="tad-player-track"><i></i></div>
+        <div class="tad-player-actions">
+            <button type="button" data-tad-player="prev" title="上一句" aria-label="上一句">⏮</button>
+            <button type="button" data-tad-player="pause" title="暂停/继续（空格）" aria-label="暂停或继续">暂停</button>
+            <button type="button" data-tad-player="next" title="下一句" aria-label="下一句">⏭</button>
+            <button type="button" data-tad-player="close" title="停止朗读" aria-label="停止朗读">✕</button>
+        </div>`;
+    bindPlayerBar(player);
+
+    document.addEventListener('keydown', (event) => {
+        if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) return;
+        // 打字的地方、正开着设置面板、焦点在气泡上时，都别抢键。
+        if (isTypingTarget(event.target)) return;
+        if (event.target.closest?.(VOICE_NODE)) return;
+        if (!overlay.hidden) return;
+        if (player.hidden) return;
+        if (event.key === ' ') {
+            event.preventDefault();
+            togglePause();
+        } else if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+            event.preventDefault();
+            stepPlay(event.key === 'ArrowRight' ? 1 : -1);
+        }
+    });
+
+    document.body.append(fab, player, overlay);
     applyFabVisibility();
     refreshStatus();
 }
@@ -2476,6 +2865,8 @@ function init() {
         eventSource.on(event_types.APP_READY, mountExtensionSettings);
     }
     bindBubbleMenu();
+    // 播放进度统一走这一个回调：播放条进度、当前句高亮都从这里来。
+    voiceEngine.onProgress = paintProgress;
     // 设置在内存里留了一份，别的标签页改了之后要跟着失效。
     window.addEventListener('storage', (event) => {
         if (event.key && event.key !== STORAGE.settings) return;

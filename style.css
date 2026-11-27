@@ -702,3 +702,116 @@
         transition: none;
     }
 }
+/* ---------- 迷你播放条 ---------- */
+/* 同 #tad-overlay：fixed 的包含块高度是 0，只能用视口单位算位置。 */
+#tad-player {
+    position: fixed;
+    top: calc(100vh - 128px);
+    top: calc(100dvh - 128px);
+    left: 12px;
+    z-index: 100000;
+    width: min(320px, calc(100vw - 24px));
+    box-sizing: border-box;
+    padding: 8px 10px 10px;
+    border: 1px solid color-mix(in srgb, var(--SmartThemeQuoteColor, #9bb6ff) 55%, transparent);
+    border-radius: 12px;
+    background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #1a1a1a) 92%, transparent);
+    color: var(--SmartThemeBodyColor, #eee);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+    backdrop-filter: blur(6px);
+    font-size: 12px;
+    line-height: 1.4;
+}
+
+#tad-player[hidden] {
+    display: none;
+}
+
+.tad-player-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 2px;
+}
+
+.tad-player-who {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-weight: 600;
+}
+
+.tad-player-time,
+.tad-player-queue {
+    flex: none;
+    opacity: 0.72;
+    font-variant-numeric: tabular-nums;
+}
+
+.tad-player-text {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+    margin-bottom: 6px;
+    opacity: 0.9;
+}
+
+.tad-player-track {
+    height: 3px;
+    border-radius: 999px;
+    background: color-mix(in srgb, currentColor 18%, transparent);
+    overflow: hidden;
+}
+
+.tad-player-track > i {
+    display: block;
+    width: var(--tad-progress, 0%);
+    height: 100%;
+    border-radius: inherit;
+    background: var(--SmartThemeQuoteColor, #9bb6ff);
+    transition: width 0.2s linear;
+}
+
+.tad-player-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 8px;
+}
+
+.tad-player-actions button {
+    flex: 1;
+    padding: 4px 0;
+    border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+    border-radius: 8px;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+}
+
+.tad-player-actions button:hover {
+    background: color-mix(in srgb, currentColor 12%, transparent);
+}
+
+.tad-player-actions button[hidden] {
+    display: none;
+}
+
+/* 逐句进度：念到哪儿，底色铺到哪儿（气泡模式靠声波动画，不用这个）。 */
+.tad-line.playing {
+    background-image: linear-gradient(
+        90deg,
+        color-mix(in srgb, var(--SmartThemeQuoteColor, #9bb6ff) 26%, transparent) 0 var(--tad-progress, 0%),
+        transparent var(--tad-progress, 0%)
+    );
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .tad-player-track > i {
+        transition: none;
+    }
+}
