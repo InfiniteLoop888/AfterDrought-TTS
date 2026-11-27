@@ -365,3 +365,73 @@ export class VoiceEngine {
         }
     }
 }
+
+// ---------- 长句兜底：网关嫌句子太长时，把拆出来的半句拼回一句 ----------
+// 两段都解成 24k 单声道再拼，中间留 0.2 秒；段首段尾各 10ms 淡入淡出，接缝不会爆音。
+const JOIN_RATE = 24000;
+const JOIN_GAP = 0.2;
+
+async function decodeMono(blobs, rate) {
+    const Ctor = globalThis.OfflineAudioContext || globalThis.webkitOfflineAudioContext;
+    if (!Ctor) return null;
+    // 用目标采样率的离线上下文解码，decodeAudioData 会自动重采样。
+    const ctx = new Ctor(1, 1, rate);
+    const clips = [];
+    for (const blob of blobs) {
+        const buffer = await ctx.decodeAudioData(await blob.arrayBuffer());
+        const mono = new Float32Array(buffer.length);
+        for (let channel = 0; channel < buffer.numberOfChannels; channel += 1) {
+            const data = buffer.getChannelData(channel);
+            for (let i = 0; i < data.length; i += 1) mono[i] += data[i] / buffer.numberOfChannels;
+        }
+        clips.push(mono);
+    }
+    return clips;
+}
+
+function encodeJoinWav(clips, rate) {
+    const gap = Math.round(rate * JOIN_GAP);
+    const total = clips.reduce((sum, clip) => sum + clip.length, 0) + gap * Math.max(0, clips.length - 1);
+    const view = new DataView(new ArrayBuffer(44 + total * 2));
+    const ascii = (offset, text) => {
+        for (let i = 0; i < text.length; i += 1) view.setUint8(offset + i, text.charCodeAt(i));
+    };
+    ascii(0, 'RIFF');
+    view.setUint32(4, 36 + total * 2, true);
+    ascii(8, 'WAVEfmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true);
+    view.setUint32(24, rate, true);
+    view.setUint32(28, rate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    ascii(36, 'data');
+    view.setUint32(40, total * 2, true);
+    let offset = 44;
+    clips.forEach((clip, index) => {
+        const fade = Math.min(Math.round(rate * 0.01), Math.floor(clip.length / 2));
+        for (let i = 0; i < clip.length; i += 1) {
+            let sample = clip[i];
+            if (fade && i < fade) sample *= i / fade;
+            if (fade && i >= clip.length - fade) sample *= (clip.length - 1 - i) / fade;
+            view.setInt16(offset, Math.max(-32768, Math.min(32767, Math.round(sample * 32767))), true);
+            offset += 2;
+        }
+        if (index < clips.length - 1) offset += gap * 2;
+    });
+    return new Blob([view.buffer], { type: 'audio/wav' });
+}
+
+// 拼不起来（没有 OfflineAudioContext、解码失败）就返回 null，调用方按原样报错。
+export async function joinBlobs(blobs) {
+    const list = (Array.isArray(blobs) ? blobs : []).filter((blob) => blob && blob.size);
+    if (list.length < 2) return null;
+    try {
+        const clips = await decodeMono(list, JOIN_RATE);
+        if (!clips || clips.length < 2) return null;
+        return encodeJoinWav(clips, JOIN_RATE);
+    } catch {
+        return null;
+    }
+}

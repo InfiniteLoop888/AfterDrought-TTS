@@ -133,6 +133,14 @@
     color: var(--SmartThemeQuoteColor, #e18a24);
 }
 
+/* 心声：和 ST 的 data-sttts-inner 一样不带引号，斜体区分。 */
+.tad-line.tad-inner .tad-line-body,
+.tad-spoken.tad-inner,
+.tad-kept.tad-inner {
+    font-style: italic;
+    opacity: 0.92;
+}
+
 .tad-line-mark {
     display: none;
     align-items: center;

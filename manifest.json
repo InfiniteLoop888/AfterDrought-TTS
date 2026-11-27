@@ -1,7 +1,7 @@
 {
     "name": "tts-afterdrought",
     "display_name": "TTS Afterdrought",
-    "version": "0.5.0",
+    "version": "0.6.0",
     "author": "local",
     "description": "把酒馆对白发给语音网关并播放。渲染可选气泡或台词。",
     "loading_location": "before_body",

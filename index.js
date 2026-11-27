@@ -1,6 +1,7 @@
 import { eventSource, event_types, setExtensionPrompt, extension_prompt_types, extension_prompt_roles } from '../../../../script.js';
-import { parseDialogueLines, takeDirector, segmentText, splitSentences, visibleText, voiceEffect, stableStringify } from './tad/parse.js';
-import { VoiceEngine } from './tad/audio.js';
+import { compileFormat, DEFAULT_VOICE_FORMAT, formatProblem, parseDialogueLines, splitSentences, voiceEffect } from './tad/parse.js';
+import { markLine, unmark, waveMarks } from './tad/mark.js';
+import { VoiceEngine, joinBlobs } from './tad/audio.js';
 import { audioStore } from './tad/store.js';
 
 const STORAGE = {
@@ -109,7 +110,7 @@ function autoPlay() {
 function defaultSettings() {
     return {
         version: 2,
-        prompt: { enabled: true, depth: 1, role: 'system', content: '', builtin: true },
+        prompt: { enabled: true, depth: 1, role: 'system', content: '', builtin: true, format: DEFAULT_VOICE_FORMAT },
         playback: { scope: 'dialogue', compat: false, autoInfer: false, progressive: false, bufferSize: 5, volume: 1, rate: 1, follow: true, sfx: true },
         notify: { enabled: true, success: false, warning: true, error: true },
         regexFilters: [
@@ -156,6 +157,9 @@ function loadSettings() {
     settings.playback.follow = settings.playback.follow !== false;
     settings.playback.sfx = settings.playback.sfx !== false;
     if (!Array.isArray(settings.regexFilters)) settings.regexFilters = defaults.regexFilters;
+    // 存坏了就退回默认模板，不然提示词、解析、渲染三边对不上。
+    const storedFormat = String(settings.prompt.format || '').trim();
+    settings.prompt.format = storedFormat && !formatProblem(storedFormat) ? storedFormat : DEFAULT_VOICE_FORMAT;
     settings.version = 2;
     settingsCache = settings;
     return settings;
@@ -263,7 +267,7 @@ function sceneChatText() {
     const ctx = chatContext();
     const chat = Array.isArray(ctx?.chat) ? ctx.chat : [];
     if (!chat.length) return '';
-    return chat.slice(-4).map((entry) => `${entry?.name || ''}\n${entry?.mes || ''}`).join('\n');
+    return chat.slice(-6).map((entry) => `${entry?.name || ''}\n${entry?.mes || ''}`).join('\n');
 }
 
 function characterRosterText() {
@@ -282,7 +286,14 @@ function characterRosterText() {
             if (name && scene.includes(name)) return true;
             return aliases.some((alias) => scene.includes(alias));
         }).map(rosterLabel).filter(Boolean);
-        if (seen.length) names = seen;
+        if (seen.length) {
+            // 当前角色这几条里可能只用了代词，也一并列上。
+            const active = canonicalSpeaker(currentCharacterName());
+            const entry = gatewayCharacters.find((item) => rosterNames(item).name === active);
+            const label = entry ? rosterLabel(entry) : '';
+            if (label && !seen.includes(label)) seen.push(label);
+            names = seen;
+        }
     }
     // 逐条 "- 名字" 换成一行分号分隔，语义不变，注入长度大约省一半。
     return names.join('；');
@@ -362,75 +373,127 @@ function watchGatewayCharacters() {
     schedule(delay);
 }
 
+// 台词格式：提示词、解析、渲染共用同一条模板（见 tad/parse.js 的 compileFormat）。
+function voiceFormat() {
+    const stored = String(loadSettings().prompt.format || '').trim();
+    return stored && !formatProblem(stored) ? stored : DEFAULT_VOICE_FORMAT;
+}
+
+/** 把占位符换成示例值，提示词里的例子就不用手写三遍格式。 */
+function formatExample(format, values) {
+    return format.replace(/\{(译文|角色|情绪|文本)\}/g, (match, field) => (
+        values[field] === undefined ? match : String(values[field])
+    ));
+}
+
 function dialoguePrompt() {
+    const format = compileFormat(voiceFormat());
+    if (format.free) return freeDialoguePrompt(format);
+    const say = (role, emotion, text, translation = text) => formatExample(format.source, {
+        译文: translation, 角色: role, 情绪: emotion, 文本: text,
+    });
+    // 四种写错的例子是按默认模板写的，换了模板就不再举例，免得教错。
+    const mistakes = format.standard ? `
+最常见的四种写错，照右边的样子改：
+错误：“我其实一直……”<tts>甘雨|平静|……想跟你说。</tts>前半句只放译文、后半句只放标签，读者看不到全句，念出来也是断的；正确：“我其实一直……想跟你说。”<tts>甘雨|难过|我其实一直……想跟你说。</tts>
+错误：“嗯。”“好的。”<tts>甘雨|温柔|嗯。好的。</tts>两句独立对白并成一组；正确：“嗯。”<tts>甘雨|平静|嗯。</tts>“好的。”<tts>甘雨|温柔|好的。</tts>
+错误：她低下头。<tts>甘雨|害羞|“你回来了。”她低下头，把杯子往前推了推。</tts>旁白进了标签会被当成台词念；正确：“你回来了。”<tts>甘雨|害羞|你回来了。</tts>她低下头，把杯子往前推了推。
+错误：“你回来了。<tts>甘雨|害羞|你回来了。</tts>译文的引号没闭合，标签前后对不上；正确：“你回来了。”<tts>甘雨|害羞|你回来了。</tts>
+` : '';
     return `[对白语音标记]
 
-所有角色真正说出口的对白都必须添加语音标记。旁白、动作、环境、心理活动保持普通正文，不添加标记。不要为了加标记而改剧情、对白或性格。
+所有角色真正说出口的对白都必须写成这一完整格式：
+${format.source}
+
+「译文」是正文里读者看到的那句，紧贴在标签前面；标签里依次写角色、情绪、文本，字段之间用英文竖线 | 分隔，必须完整闭合。旁白、动作、环境、未说出口的心理活动保持普通正文，不加标签。不要为了加标签而改剧情、对白或性格。
+
+中文台词（最容易出错）：译文和文本是同一整句话，把整句完整写两遍，两边一字不差。绝不能把一句话拆成两半——前半句放译文里、后半句只放标签里——那样读者只看得到前半句，念出来也是断的。以前那种 [角色, 情绪] “台词” 不用了。
 
 下面这些最容易漏，也都算说出口的对白：一两个字的短答（“嗯。”“好。”）、感叹和喊叫、打断别人、一口气连着说的几句、被旁白隔开的后半截。一段回复里，一句说出口的话都不能漏。
 
-对白是角色说出口的话。旁白是动作、神态、环境和心理。情绪是这句话的情感。语气是怎么发声，例如轻声、缓慢、犹豫。情绪和语气必须分开写。
+对白是角色说出口的话。旁白是动作、神态、环境和心理。情绪是这句话的情感，只能从下面的词表里挑一个。
 
-已注册角色，标记里必须用显示名：
+已注册角色，标签里必须用显示名：
 ${characterRosterText()}
-1. 表里的人用显示名，不要用别名、昵称、简称或代词当标记里的名字。
+1. 表里的人用显示名，不要用别名、昵称、简称或代词当名字。
 2. 不在表里的人，按剧情写全名。不要只写姓、职位、称号或「他」「她」。
 3. 同一个人全文只用这一个名字。旁白里可以自然用代词。
-4. 角色名不能省略。逗号必须是英文逗号。
+4. 角色名不能省略，也不能写成 {角色} 之类的占位符。字段之间只用英文竖线 |。
 
-只有一种情绪时：
-[角色名, 情绪] “对白内容”
+一条标签只对应一个说话者的同一段连续发言、一个情绪。换说话者、中间插进旁白、或者情绪变了，就另起一组（再写一条译文加一个标签）。不要把多个人的发言塞进同一个标签，也不要把两句独立对白并成一组：
 
-[甘雨, 害羞] “你、你怎么突然说这种话……”
-[甘雨, 平静] “今天的工作终于结束了。”
+${say('甘雨', '惊讶', '诶？你怎么突然回来了……')}${say('甘雨', '害羞', '我、我只是刚好在这里休息而已。')}
 
-标记紧贴这句对白。对白可以单独成行，也可以和旁白写在同一段里，不必为了标记换行。引号用中文双引号，里面只能是说出口的话。不要把动作、心理或旁白放进引号，也不要接在标记后面。不要把多句独立对白并成一条标记。
+一组里译文和文本都写完整，标签两侧各留空一格也不影响，但不要在标签外面再重复一遍这句台词。
 
-最常见的三种写错，照右边的样子改：
-错误：“我其实一直……”[甘雨, 平静] “……想跟你说。”前半句在标记外面，念不出来；正确：[甘雨] 〖vd:{"segments":[{"text":"我其实一直……","emotion":"难过"},{"text":"想跟你说。","emotion":"害羞"}]}〗
-错误：[甘雨, 平静] “嗯。”“好的。”两句独立对白并成一条，后一句念不出来；正确：[甘雨, 平静] “嗯。”[甘雨, 温柔] “好的。”
-错误：[甘雨, 害羞] “你回来了。她低下头，把杯子往前推了推。”旁白写进引号会被当成台词念；正确：[甘雨, 害羞] “你回来了。”她低下头，把杯子往前推了推。
-
-同一句里情绪变了，整句只放进 segments，标记里不写情绪，外面不要再写对白或引号，也不要把旁白放进 segments：
-[角色名] 〖vd:{"segments":[{"text":"第一段对白","emotion":"情绪","pause_after_ms":200},{"text":"第二段对白","emotion":"情绪"}]}〗
-
-[甘雨] 〖vd:{"segments":[{"text":"诶？你怎么突然回来了……","emotion":"惊讶","pause_after_ms":200},{"text":"我、我只是刚好在这里休息而已。","emotion":"害羞"}]}〗
-
-segments 按说话顺序，每段是一段连续对白，并各自写 emotion。只有情绪真的变了才分段。拿不准就保持整句，用普通格式。
+长台词要拆开写：一口气超过四十来字，就按句号、问号、感叹号或逗号拆成两三组，每组各自写完整译文和标签，念的时候会自然接上。例如：
+“我知道你现在很难受，可是我们总得想个办法，不能一直这样拖下去，再拖下去村子里的水源真的撑不住了。”拆成：
+${say('甘雨', '担忧', '我知道你现在很难受，可是我们总得想个办法。')}${say('甘雨', '焦急', '不能一直这样拖下去，再拖下去村子里的水源真的撑不住了。')}
+${mistakes}
+同一句里的情绪真的变了，就另起一组，两组各自写完整译文：
+${say('甘雨', '不满', '我真的没有生气。')}${say('甘雨', '委屈', '只是……你下次不要这样突然离开。')}
 
 情绪只能从这些词里选，不要自造、缩写或改写：${promptEmotionNames().join('、')}。听不出明显情绪时用平静，不要为了表现丰富而硬加情绪。
 平静：有意识地保持平稳、克制。
 日常：普通生活交流。
 自然：轻松，不刻意表现情绪。
+害羞、生气这类词只写进情绪字段，不要写进角色名，也不要在台词里用括号标注。
 
-语气不是情绪。需要时才写 delivery，放在右引号前面：
-[角色名, 情绪] “对白内容〖vd:{"delivery":{"intensity":"whisper","pace":"slow"}}〗”
-intensity 是发声方式，不是音量数字。只能是 normal、gentle、soft、whisper、firm、cold、teasing、hesitant、excited、crying、laughing。
-pace 只能是 fast、normal、gentle、slow。
-没有特殊语气就不要写 delivery。不要把害羞、生气写进 intensity，也不要把 whisper、slow 写进 emotion。不要自造取值。
+正文里不要解释标签怎么用，也不要为了举例把台词放进代码块。
 
-整句换情绪，又要统一语气时，delivery 写在导演块根上，作为整句默认。某一段要盖过它，才在那个 segment 里再写 delivery：
-[甘雨] 〖vd:{"delivery":{"intensity":"soft","pace":"slow"},"segments":[{"text":"诶？你怎么突然回来了……","emotion":"惊讶","pause_after_ms":200},{"text":"我、我只是刚好在这里休息而已。","emotion":"害羞"}]}〗
-[甘雨] 〖vd:{"segments":[{"text":"我真的没有生气。","emotion":"不满"},{"text":"只是……你下次不要这样突然离开。","emotion":"委屈","delivery":{"intensity":"hesitant","pace":"slow"}}]}〗
-同一层不要写两个 delivery。
+写完后在心里核对一遍：每句说出口的话是否都有完整的一组（译文 + 角色|情绪|文本）；译文与文本是否逐句对应、两边一字不差；所有标签是否都闭合了。核对过程不要写出来。
 
-pause_after_ms 是这一段说完后的停顿，只在确实需要时写。短暂停顿 100–250，语气转折 250–450，明显停顿 450–800。不要每段都加，不要写负数或超过 800。最后一段通常不写。
-
-JSON 使用双引号，不要尾随逗号。正文里不要提到标记或导演块，也不要为了举例把对白放进代码块。
-
-写完后在心里核对一遍：每句说出口的话都有标记、一条标记只对应一个说话人、引号里只有台词、segments 的原文和情绪都齐。核对过程不要写出来。
-
-这些规则只管台词怎么写。预设、角色卡、状态栏、选项、思考过程、变量更新该输出的照常完整输出，不要因为加标记而省略或改写。
+这些规则只管台词怎么写。预设、角色卡、状态栏、选项、思考过程、变量更新该输出的照常完整输出，不要因为加标签而省略或改写。
 
 她把目光挪开，手指不自觉地整理了一下衣袖。
-[甘雨, 害羞] “你、你怎么突然说这种话……”
+${say('甘雨', '害羞', '你、你怎么突然说这种话……')}
 她稍微停顿了一下，随后恢复了平日的语气。
-[甘雨, 平静] “今天的工作终于结束了。”
+${say('甘雨', '平静', '今天的工作终于结束了。')}
 甘雨轻轻点头，声音也放柔了些。
-[甘雨, 温柔] “嗯，那我们走吧。”
+${say('甘雨', '温柔', '嗯，那我们走吧。')}
 
-同一段里也可以夹着旁白。每一句对白各自一个标记，中间的旁白保持普通正文：
-[胡桃, 惊喜] “专程来找我的？”胡桃一把将两扇门板推得大敞，红褐色的双马尾随着她大幅度的转身晃晃悠悠。[胡桃] 〖vd:{"segments":[{"text":"快请进快请进！本堂主平时想拉甘雨姐姐喝杯粗茶比登天还难呢。","emotion":"调皮","pause_after_ms":280},{"text":"久旱对吧？能把这位加班狂人从文书堆里拐出来，你面子可真不小。","emotion":"得意"}]}〗`.trim();
+同一段里也可以夹着旁白。每一句对白各写一组，中间的旁白保持普通正文：
+${say('胡桃', '惊喜', '专程来找我的？')}胡桃一把将两扇门板推得大敞，红褐色的双马尾随着她大幅度的转身晃晃悠悠。${say('胡桃', '调皮', '快请进快请进！')}`.trim();
+}
+
+// 自由格式：正文照常写，标签只补充「谁、什么情绪、念哪句」。
+// 显示文本取自标签前面紧贴的那句话，所以正文一个字都不用改，也不会重复。
+function freeDialoguePrompt(format) {
+    const say = (role, emotion, text) => formatExample(format.source, { 角色: role, 情绪: emotion, 文本: text });
+    return `[对白语音标记]
+
+角色的对白照常写在正文里，原来的引号、旁白、动作都保持不动；在每句说出口的话后面紧跟一个语音标签：
+${format.source}
+
+标签里依次写角色、情绪、文本：角色必须是显示名，情绪从下面的词表里挑一个，文本是真正要念出来的那句。读者看到的是正文里那句，听到的是标签里的文本，两边可以略有出入（比如补上语气词），但不要改成另一句话。
+
+正文里那句要用引号包住，标签紧跟在引号后面（引号 “” 或「」都行）：这句话就是显示出来的文本，标签只负责发音。
+
+已注册角色，标签里必须用显示名：
+${characterRosterText()}
+1. 表里的人用显示名，不要用别名、昵称、简称或代词当名字。
+2. 不在表里的人，按剧情写全名。不要只写姓、职位、称号或「他」「她」。
+3. 同一个人全文只用这一个名字。
+4. 角色名不能省略，也不能写成 {角色} 之类的占位符。字段之间只用英文竖线 |。
+
+一句说出口的话只配一个标签，换说话者、中间插进旁白、或者情绪变了，就另起一个。一两个字的短答、感叹、喊叫、被打断的半句，都要配标签。
+
+示例：
+她稍微停顿了一下，随后恢复了平日的语气。
+“今天的工作终于结束了。”${say('甘雨', '平静', '今天的工作终于结束了。')}
+甘雨轻轻点头，声音也放柔了些。
+“嗯，那我们走吧。”${say('甘雨', '温柔', '嗯，那我们走吧。')}
+
+长台词要拆开写：一口气超过四十来字，就按句号、问号、感叹号或逗号拆成两三句，每句后面各配一个标签，念的时候会自然接上。
+
+情绪只能从这些词里选，不要自造、缩写或改写：${promptEmotionNames().join('、')}。听不出明显情绪时用平静。
+害羞、生气这类词只写进情绪字段，不要写进角色名，也不要在台词里用括号标注。
+
+正文里不要解释标签怎么用，也不要为了举例把台词放进代码块。
+
+写完后在心里核对一遍：每句说出口的话后面是否都有一个完整闭合的标签；角色名是否都是显示名。核对过程不要写出来。
+
+这些规则只管标签怎么写。预设、角色卡、状态栏、选项、思考过程、变量更新该输出的照常完整输出，不要因为加标签而省略或改写。`.trim();
 }
 
 function promptRole(role) {
@@ -445,7 +508,9 @@ function activePrompt() {
         return String(prompt.content)
             .replaceAll('{{CHAR}}', currentCharacterName())
             .replaceAll('{{CHARACTERS}}', characterRosterText())
-            .replaceAll('{{EMOTIONS}}', promptEmotionNames().join('、'));
+            .replaceAll('{{EMOTIONS}}', promptEmotionNames().join('、'))
+            .replaceAll('{{格式}}', voiceFormat())
+            .replaceAll('{{FORMAT}}', voiceFormat());
     }
     return dialoguePrompt();
 }
@@ -575,6 +640,31 @@ function gatewayCharacter(name) {
         .some((part) => String(part || '').trim().toLowerCase() === key)) || null;
 }
 
+// 同一个角色的不同写法归到一个显示名：模型有时写别名（甘雨/王小美），有时只写全名的一段。
+// 不归并的话，缓存键、data-voice-name、播放条会各算一份。
+const ROLE_SEP = /[·・•‧∙⋅/／\\\s]+/u;
+
+function canonicalSpeaker(name) {
+    const raw = String(name || '').trim();
+    if (!raw || !gatewayCharacters.length) return raw;
+    const exact = gatewayCharacter(raw);
+    if (exact) return rosterNames(exact).name || raw;
+    const parts = raw.split(ROLE_SEP).filter(Boolean);
+    if (parts.length < 2) return raw;
+    const hits = gatewayCharacters.filter((item) => {
+        const { name: full, aliases } = rosterNames(item);
+        return [full, ...aliases].filter(Boolean).some((candidate) => {
+            if (candidate === raw) return true;
+            const own = candidate.split(ROLE_SEP).filter(Boolean);
+            // 卡里写全名、模型只写其中一段（或反过来）都算同一个人。
+            if (own.length > 1) return parts.every((part) => own.includes(part));
+            return parts.includes(candidate);
+        });
+    });
+    const names = [...new Set(hits.map((item) => rosterNames(item).name).filter(Boolean))];
+    return names.length === 1 ? names[0] : raw;
+}
+
 // 网关照它实际用的参考音频和推理配置给版本号。网关没给时退回角色配置的修改时间。
 function voiceRevision(speaker) {
     const item = gatewayCharacter(speaker);
@@ -584,33 +674,33 @@ function voiceRevision(speaker) {
     return `${voice}\u0003${synthesis}`;
 }
 
-function bubbleKey(speaker, emotion, text, director = '') {
-    return `${speaker}\n${emotion}\n${text}\n${director}\n${voiceRevision(speaker)}`;
+function bubbleKey(speaker, emotion, text) {
+    const who = canonicalSpeaker(speaker);
+    return `${who}\n${emotion}\n${text}\n${voiceRevision(who)}`;
 }
 
-function voiceAttrs(speaker, emotion, text, settled, director) {
-    // 导演块先按键名排序再序列化，模型换个键序不该多合成一遍。
-    const directorText = director ? stableStringify(director) : '';
+function voiceAttrs(speaker, emotion, text, settled) {
+    // 别名先归并到显示名，缓存键和播放条才不会同一个角色出现两份。
+    speaker = canonicalSpeaker(speaker);
     // 「电话·开心」：标记词只决定播放音效，送给网关的情绪是后面的「开心」。
     const spoken = voiceEffect(emotion);
-    const key = bubbleKey(speaker, spoken.emotion, text, directorText);
+    const key = bubbleKey(speaker, spoken.emotion, text);
     const cached = memory.get(key) || '';
     const status = cached ? 'ready' : (pending.has(key) ? 'queued' : 'waiting');
     const loading = status === 'queued' ? ' loading' : '';
     const url = cached ? ` data-audio-url="${escapeHtmlAttr(cached)}"` : '';
     const settledAttr = settled ? '' : ' data-settled="0"';
-    const directorAttr = directorText ? ` data-director="${escapeHtmlAttr(directorText)}"` : '';
     const effectAttr = spoken.effect ? ` data-effect="${spoken.effect}"` : '';
     const effectName = spoken.effect === 'phone' ? '电话' : (spoken.effect === 'inner' ? '心声' : '');
     const shownEmotion = spoken.emotion && spoken.emotion !== 'default' ? ` · ${spoken.emotion}` : '';
     const label = `播放 ${speaker}${shownEmotion}${effectName ? `（${effectName}音效）` : ''}`;
     // 声波是 span，键盘和读屏都够不着。补上按钮语义和标签。
-    const attrs = ` role="button" tabindex="0" aria-label="${escapeHtmlAttr(label)}" data-status="${status}" data-key="${escapeHtmlAttr(key)}"${url} data-text="${escapeHtmlAttr(text)}" data-voice-name="${escapeHtmlAttr(speaker)}" data-voice-emotion="${escapeHtmlAttr(spoken.emotion)}"${effectAttr}${settledAttr}${directorAttr}`;
+    const attrs = ` role="button" tabindex="0" aria-label="${escapeHtmlAttr(label)}" data-status="${status}" data-key="${escapeHtmlAttr(key)}"${url} data-text="${escapeHtmlAttr(text)}" data-voice-name="${escapeHtmlAttr(speaker)}" data-voice-emotion="${escapeHtmlAttr(spoken.emotion)}"${effectAttr}${settledAttr}`;
     return { loading, attrs };
 }
 
-function buildBubbleHtml(speaker, emotion, text, settled = true, director = null) {
-    const state = voiceAttrs(speaker, emotion, text, settled, director);
+function buildBubbleHtml(speaker, emotion, text, settled = true, inner = false) {
+    const state = voiceAttrs(speaker, emotion, text, settled);
     const width = Math.min(220, 60 + Math.max(2, Math.ceil(text.length * 0.25)) * 10);
     const seconds = Math.max(2, Math.ceil(text.length * 0.25));
     // 气泡只显示声波和大致时长，长句不好分辨，用 title 补上说话人和台词开头。
@@ -619,25 +709,49 @@ function buildBubbleHtml(speaker, emotion, text, settled = true, director = null
     const effectName = spoken.effect === 'phone' ? '电话' : (spoken.effect === 'inner' ? '心声' : '');
     const shown = spoken.emotion && spoken.emotion !== 'default' ? ` · ${spoken.emotion}` : '';
     const tip = `${speaker}${shown}${effectName ? `（${effectName}）` : ''}：${excerpt}`;
-    return `<span class="voice-bubble tad-voice${state.loading}" style="width: ${width}px"${state.attrs} title="${escapeHtmlAttr(tip)}">${BARS_HTML}<span class="sovits-voice-duration">${seconds}&quot;</span></span>`;
+    return `<span class="voice-bubble tad-voice${state.loading}" style="width: ${width}px"${state.attrs}${inner ? ' data-inner="1"' : ''} title="${escapeHtmlAttr(tip)}">${BARS_HTML}<span class="sovits-voice-duration">${seconds}&quot;</span></span>`;
 }
 
-function spokenColor(html) {
-    return `<span class="tad-spoken">${html}</span>`;
+function spokenColor(html, inner = false) {
+    return `<span class="tad-spoken${inner ? ' tad-inner' : ''}">${html}</span>`;
 }
 
-function presentDialogue(text) {
+function presentDialogue(text, inner = false) {
     const value = String(text || '').trim();
+    // 心声本来就不带引号（斜体显示），和 ST 的 data-sttts-inner 一致。
+    if (inner) return value;
     if (/^[「“"『]/.test(value)) return value;
     return `“${value}”`;
 }
 
-function buildLineHtml(speaker, emotion, text, settled = true, director = null) {
-    const state = voiceAttrs(speaker, emotion, text, settled, director);
+// 情绪字段里写着心声就算心声：这类台词在正文里不带引号，斜体显示。
+function innerVoice(emotion) {
+    return /心声|内心|独白|inner/i.test(emotion || '');
+}
+
+// 扩展关掉时正文不再改写，把「译文<tts>角色|情绪|文本</tts>」收成读者该看的样子。
+// 顺带清掉可能残留的标记字符，免得私用区字符留在正文里。
+function humanizeTtsTags(html) {
+    return unmark(String(html || ''))
+        .replace(/([”」』"])\s*<(?:i-)?tts>[\s\S]*?<\/(?:i-)?tts>/gi, '$1')
+        .replace(/<(?:i-)?tts>([\s\S]*?)<\/(?:i-)?tts>/gi, (match, inner) => {
+            const parts = String(inner).replace(/｜/g, '|').split('|');
+            const spoken = parts.length >= 2 ? parts[parts.length - 1].trim() : '';
+            if (!spoken) return '';
+            const emotion = parts.length === 3 ? parts[1].trim() : '';
+            return escapeHtmlAttr(presentDialogue(spoken, innerVoice(emotion)));
+        });
+}
+
+function buildLineHtml(speaker, emotion, text, settled = true, options = {}) {
+    const state = voiceAttrs(speaker, emotion, text, settled);
     const spoken = voiceEffect(emotion);
     const effectName = spoken.effect === 'phone' ? '电话' : (spoken.effect === 'inner' ? '心声' : '');
     const title = `${speaker}${spoken.emotion && spoken.emotion !== 'default' ? ` · ${spoken.emotion}` : ''}${effectName ? `（${effectName}）` : ''}`;
-    return `<span class="tad-line tad-voice${state.loading}"${state.attrs} title="${escapeHtmlAttr(title)}"><span class="tad-line-body">${escapeHtmlAttr(presentDialogue(text))}</span><span class="tad-line-mark">${BARS_HTML}</span></span>`;
+    const display = options.display ?? presentDialogue(text, options.inner);
+    const innerAttr = options.inner ? ' data-inner="1"' : '';
+    const innerClass = options.inner ? ' tad-inner' : '';
+    return `<span class="tad-line tad-voice${state.loading}${innerClass}"${state.attrs}${innerAttr} title="${escapeHtmlAttr(title)}"><span class="tad-line-body">${escapeHtmlAttr(display)}</span><span class="tad-line-mark">${BARS_HTML}</span></span>`;
 }
 
 function speakerKnown(name) {
@@ -645,15 +759,26 @@ function speakerKnown(name) {
     return gatewayCharacter(name) !== null;
 }
 
-function keptHtml(speaker, text) {
-    return `<span class="tad-kept">${escapeHtmlAttr(presentDialogue(text))}</span>`;
+function keptHtml(speaker, text, inner = false) {
+    const innerClass = inner ? ' tad-inner' : '';
+    const shown = String(text || '').trim();
+    const innerAttr = inner ? ' data-inner="1"' : '';
+    return `<span class="tad-kept${innerClass}"${innerAttr}>${escapeHtmlAttr(shown ? presentDialogue(shown, inner) : '')}</span>`;
 }
 
 function keptFromNode(node) {
+    const inner = node.dataset.inner === '1';
     if (node.classList.contains('tad-line')) {
-        return node.querySelector('.tad-line-body')?.textContent || presentDialogue(node.dataset.text || '');
+        return node.querySelector('.tad-line-body')?.textContent || presentDialogue(node.dataset.text || '', inner);
     }
-    return presentDialogue(node.dataset.text || '');
+    return presentDialogue(node.dataset.text || '', inner);
+}
+
+// 自动连播队列也存 { key, node }：同一楼里重复的台词会被当成两句，各自高亮、各自记已播。
+function pushAuto(track) {
+    if (!track?.key) return;
+    if (autoList.some((item) => item.key === track.key && (item.node || null) === (track.node || null))) return;
+    autoList.push(track);
 }
 
 function forgetVoice(key) {
@@ -661,8 +786,9 @@ function forgetVoice(key) {
     pending.delete(key);
     const queued = genQueue.findIndex((item) => item.key === key);
     if (queued >= 0) genQueue.splice(queued, 1);
-    const auto = autoList.indexOf(key);
-    if (auto >= 0) autoList.splice(auto, 1);
+    for (let i = autoList.length - 1; i >= 0; i -= 1) {
+        if (autoList[i].key === key) autoList.splice(i, 1);
+    }
 }
 
 function dropCachedAudio(key) {
@@ -680,7 +806,6 @@ function refreshVoiceKeys() {
             node.dataset.voiceName,
             node.dataset.voiceEmotion || 'default',
             node.dataset.text || '',
-            node.dataset.director || '',
         );
         if (!node.dataset.key || node.dataset.key === next) return;
         dropCachedAudio(node.dataset.key);
@@ -695,6 +820,11 @@ function releaseVoiceNode(node) {
     const plain = document.createElement('span');
     plain.className = 'tad-kept';
     plain.textContent = keptFromNode(node);
+    // 心声退回纯文本时也保留斜体、不带引号。
+    if (node.dataset.inner === '1') {
+        plain.classList.add('tad-inner');
+        plain.dataset.inner = '1';
+    }
     forgetVoice(node.dataset.key);
     node.replaceWith(plain);
 }
@@ -712,62 +842,25 @@ function releaseUnknownVoices() {
 
 class SkipVoice extends Error {}
 
-function buildVoiceHtml(speaker, emotion, text, settled = true, director = null) {
-    if (gatewayCharacters.length && !speakerKnown(speaker)) return keptHtml(speaker, text);
-    if (renderMode() === 'line') return buildLineHtml(speaker, emotion, text, settled, director);
-    return buildBubbleHtml(speaker, emotion, text, settled, director);
-}
-
-function maskVoiceWidgets(html) {
-    const placeholders = [];
-    let out = '';
-    let i = 0;
-    while (i < html.length) {
-        const start = html.indexOf('<span', i);
-        if (start === -1) {
-            out += html.slice(i);
-            break;
-        }
-        const tagEnd = html.indexOf('>', start);
-        if (tagEnd === -1) {
-            out += html.slice(i);
-            break;
-        }
-        const open = html.slice(start, tagEnd + 1);
-        if (!/\bclass="[^"]*\b(?:tad-voice|voice-bubble|tad-line)\b/.test(open)) {
-            out += html.slice(i, tagEnd + 1);
-            i = tagEnd + 1;
-            continue;
-        }
-        out += html.slice(i, start);
-        let depth = 1;
-        let j = tagEnd + 1;
-        while (j < html.length && depth > 0) {
-            const nextOpen = html.indexOf('<span', j);
-            const nextClose = html.indexOf('</span>', j);
-            if (nextClose === -1) {
-                j = html.length;
-                break;
-            }
-            if (nextOpen !== -1 && nextOpen < nextClose) {
-                depth += 1;
-                const nextEnd = html.indexOf('>', nextOpen);
-                j = nextEnd === -1 ? nextOpen + 5 : nextEnd + 1;
-            } else {
-                depth -= 1;
-                j = nextClose + 7;
-            }
-        }
-        placeholders.push(html.slice(start, j));
-        out += `\u0000tad${placeholders.length - 1}\u0000`;
-        i = j;
+// 一组语音标记：正文按行切成「旁白 + 标记 + 旁白 …」，控件 HTML 单独留在 controls 里，
+// 等酒馆格式化完再由 waveMarks 换回去。
+function markSpeech(source, streaming = false) {
+    const { lines, problems } = parseDialogueLines(source, { streaming, format: voiceFormat() });
+    reportDialogueProblems(problems);
+    if (!lines.length) return null;
+    const controls = [];
+    let marked = '';
+    let at = 0;
+    for (const line of lines) {
+        marked += source.slice(at, line.start);
+        controls.push(lineVoiceHtml(line));
+        const inner = line.inner === true || innerVoice(line.emotion);
+        // 自由格式且正文里没有可取的显示句时不重复写一遍，只挂控件。
+        const display = line.tagOnly ? '' : presentDialogue(line.translation || line.text, inner);
+        marked += markLine(controls.length - 1, escapeHtmlAttr(display));
+        at = line.end;
     }
-    return { html: out, placeholders };
-}
-
-function restoreVoiceWidgets(html, placeholders) {
-    if (!placeholders.length) return html;
-    return html.replace(/\u0000tad(\d+)\u0000/g, (token, index) => placeholders[Number(index)] ?? token);
+    return { text: marked + source.slice(at), controls };
 }
 
 // 标签没认出来时给一次提示，别让用户对着一堆原始括号猜。60 秒内不重复。
@@ -785,52 +878,35 @@ function reportDialogueProblems(problems) {
     notify('warning', `有语音标记没认出来：${text}`);
 }
 
-function renderDialogueHtml(html) {
-    const source = applyRegexFilters(html).replace(/[\[【]([^\],:【】\[\]\n]{1,30})\s*[,，]\s*(?:New|new)[\]】]/g, (match, speaker) => {
-        const name = speaker.trim();
-        if (!name || /^\d+$/.test(name)) return match;
-        return `[${name}, default]`;
-    });
-
-    // 解析和渲染分开：先得到 line 对象，再按区间切片拼输出。
-    const { lines, problems } = parseDialogueLines(source, { streaming: replyStreaming() });
-    reportDialogueProblems(problems);
-
-    const lineMode = renderMode() === 'line';
-    let result = '';
-    let lastIndex = 0;
-    for (const line of lines) {
-        result += source.slice(lastIndex, line.start);
-        if (lineMode) {
-            result += buildVoiceHtml(line.speaker, line.emotion, line.text, line.settled, line.director);
-        } else {
-            const visible = line.kind === 'director'
-                ? escapeHtmlAttr(presentDialogue(line.text))
-                : source.slice(line.tagEnd, line.spokenEnd)
-                    .replace(/〖vd:[\s\S]*?〗/g, '')
-                    .replace(/^(?:\s|&nbsp;)*/, '')
-                    .replace(/^<q\b[^>]*>/i, '')
-                    .replace(/<\/q\s*>$/i, '');
-            result += spokenColor(visible);
-            if (!gatewayCharacters.length || speakerKnown(line.speaker)) {
-                result += ' ' + buildBubbleHtml(line.speaker, line.emotion, line.text, line.settled, line.director);
-            }
-        }
-        lastIndex = line.end;
+function lineVoiceHtml(line) {
+    const speaker = canonicalSpeaker(line.speaker);
+    const inner = line.inner === true || innerVoice(line.emotion);
+    const shown = line.tagOnly ? '' : (line.translation || line.text);
+    if (gatewayCharacters.length && !speakerKnown(speaker)) return keptHtml(speaker, shown, inner);
+    if (renderMode() === 'line') {
+        const display = shown ? presentDialogue(shown, inner) : '';
+        return buildLineHtml(speaker, line.emotion, line.text, line.settled, { display, inner });
     }
-    const tagged = result + source.slice(lastIndex);
-    return tagged.replace(/(\s*)\[TTSVoice[:：]\s*([^:：]+)\s*[:：]\s*([^:：]*)\s*[:：]\s*(.*?)\]/gi, (full, space, name, emotion, text) => {
-        const directed = takeDirector(visibleText(text));
-        const display = directed.text || segmentText(directed.director);
-        if (!display) return full;
-        return `${space || ''}${buildVoiceHtml(name.trim(), emotion.trim() || 'default', display, true, directed.director)}`;
-    });
+    // 气泡模式：先显示那句译文（没有译文就显示念的那句），气泡跟在后面。
+    return `${spokenColor(escapeHtmlAttr(presentDialogue(shown, inner)), inner)} ${buildBubbleHtml(speaker, line.emotion, line.text, line.settled, inner)}`;
 }
 
-function parseTextToBubbles(html) {
-    const masked = maskVoiceWidgets(html);
-    const next = restoreVoiceWidgets(renderDialogueHtml(masked.html), masked.placeholders);
-    return next === html ? html : next;
+// <tts> 不是标准标签，酒馆格式化正文时会把它剥掉，DOM 里只剩「角色|情绪|文本」这串裸文字。
+// 所以带标签的楼层从原始消息重画：先换成标记，过一遍酒馆的格式化，再把标记换回语音控件。
+function rawTtsHtml(raw, entry, id) {
+    // 边生成边显示时，还没闭合的标签先整段砍掉，译文已经写在前面，读者照样能看。
+    const text = replyStreaming() ? raw.replace(/<(?:i-)?tts>(?:(?!<\/(?:i-)?tts>)[\s\S])*$/i, '') : raw;
+    const marked = markSpeech(text, replyStreaming());
+    if (!marked) return null;
+    const ctx = chatContext();
+    if (!ctx || typeof ctx.messageFormatting !== 'function') return null;
+    let formatted;
+    try {
+        formatted = ctx.messageFormatting(marked.text, entry.name || '', !!entry.is_system, !!entry.is_user, id, {}, false);
+    } catch {
+        return null;
+    }
+    return waveMarks(String(formatted), marked.controls);
 }
 
 // 缓存以前只进不出，用久了 IndexedDB 会一路涨到配额。按条数和总字节做 LRU 淘汰。
@@ -927,6 +1003,32 @@ function newRequestId() {
 const RETRY_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
 const MAX_ATTEMPTS = 3;
 
+// ---------- 长句兜底 ----------
+// 网关嫌文本太长时按标点切成两半，各自请求，再把音频拼回一整句。
+const SPLIT_MARKS = /[，,；;。！？!?…、：:\s]/g;
+const TOO_LONG_CODES = new Set(['input_too_long', 'text_too_long', 'max_character_limit_exceeded', 'too_long']);
+const TOO_LONG_WORDS = /(?:too (?:long|large)|exceed\w*\s+(?:the\s+)?(?:max\w*|length|limit)|长度超|太长|过长|字数超|超过.{0,6}(?:字|字符|长度))/i;
+
+function halves(text) {
+    const value = String(text || '').trim();
+    if (value.length < 12) return null;
+    const middle = value.length / 2;
+    const marks = [...value.matchAll(SPLIT_MARKS)].map((match) => match.index + 1);
+    if (!marks.length) return null;
+    const cut = marks.reduce((best, pos) => (Math.abs(pos - middle) < Math.abs(best - middle) ? pos : best), marks[0]);
+    const head = value.slice(0, cut).trim();
+    const tail = value.slice(cut).trim();
+    if (head.length < 4 || tail.length < 4) return null;
+    return [head, tail];
+}
+
+function tooLongError(error) {
+    const status = Number(error?.status) || 0;
+    if (status && status !== 400 && status !== 413 && status !== 422) return false;
+    if (TOO_LONG_CODES.has(String(error?.code || '').toLowerCase())) return true;
+    return TOO_LONG_WORDS.test(String(error?.message || ''));
+}
+
 async function fetchAudio(segment) {
     const signal = speechAbort.signal;
     if (signal.aborted) throw new DOMException('已取消', 'AbortError');
@@ -939,12 +1041,37 @@ async function fetchAudio(segment) {
         } catch (error) {
             if (error?.name === 'AbortError' || error instanceof SkipVoice) throw error;
             lastError = error;
+            // 网关嫌太长：按标点切两半重来，拼好的整句照样按原 key 进缓存。
+            const parts = tooLongError(error) && !segment.split ? halves(segment.text) : null;
+            if (parts) return fetchSplitAudio(segment, parts);
             // 只对网关抖动/排队类状态码退避重试，参数错误重试也没用。
             if (!RETRY_STATUS.has(error?.status) || attempt === MAX_ATTEMPTS - 1) throw error;
             await new Promise((resolve) => setTimeout(resolve, 600 * 2 ** attempt));
         }
     }
     throw lastError || new Error('语音生成失败');
+}
+
+// 半句请求不进缓存（cache:false），拼好之后只留整句那一条。
+async function fetchSplitAudio(segment, parts) {
+    const blobs = [];
+    for (const [index, part] of parts.entries()) {
+        const url = await fetchAudio({
+            ...segment,
+            key: `${segment.key}#${index}`,
+            text: part,
+            fresh: true,
+            cache: false,
+            split: true,
+            autoplay: false,
+            track: null,
+        });
+        blobs.push(await (await fetch(url)).blob());
+        URL.revokeObjectURL(url);
+    }
+    const joined = await joinBlobs(blobs);
+    if (!joined) throw new Error('长台词切段后没能拼回一整句');
+    return storeAudio(segment, joined);
 }
 
 async function fetchAudioOnce(segment, signal) {
@@ -983,19 +1110,9 @@ async function requestAudio(segment, requestId, signal) {
         session_id: sessionId(),
         character_id: segment.speaker,
         emotion: { type: 'vector', preset, vector: null, weight: null },
+        text: segment.text,
         output: { format: 'wav', sample_rate: 24000, fresh: !!segment.fresh },
     };
-    if (segment.director && Array.isArray(segment.director.segments) && segment.director.segments.length) {
-        body.segments = segment.director.segments;
-    } else {
-        body.text = segment.text;
-    }
-    if (segment.director && segment.director.delivery && typeof segment.director.delivery === 'object') {
-        body.delivery = segment.director.delivery;
-    }
-    if (segment.director && segment.director.emotion && typeof segment.director.emotion === 'object') {
-        body.emotion = segment.director.emotion;
-    }
     let response;
     try {
         response = await fetch(`${apiBase()}/v1/tts`, {
@@ -1015,30 +1132,38 @@ async function requestAudio(segment, requestId, signal) {
         if (data && data.skip === 'missing_character') throw new SkipVoice(data.detail || '未找到角色');
         const failure = new Error((data && (data.detail || data.error)) || '语音生成失败');
         failure.status = response.status;
+        failure.code = String(data?.code || data?.error_code || '');
         throw failure;
     }
     if (!response.ok) {
         let detail = `语音生成失败 (${response.status})`;
+        let code = '';
         try {
             const data = await response.json();
             const message = data.detail || data.error;
             if (typeof message === 'string') detail = message;
+            code = String(data.code || data.error_code || '');
         } catch { /* 非 JSON 错误体 */ }
         if (response.status === 404 && detail.startsWith('未找到角色')) throw new SkipVoice(detail);
         const failure = new Error(detail);
         failure.status = response.status;
+        failure.code = code;
         throw failure;
     }
     const blob = await response.blob();
     if (signal.aborted) throw new DOMException('已取消', 'AbortError');
     if (!blob.size) throw new Error('语音网关返回了空音频');
     if (/^text\/|html/i.test(type)) throw new Error('语音网关返回的不是音频');
-    const head = new Uint8Array(await blob.slice(0, 4).arrayBuffer());
-    const riff = head[0] === 0x52 && head[1] === 0x49 && head[2] === 0x46 && head[3] === 0x46;
-    const id3 = head[0] === 0x49 && head[1] === 0x44 && head[2] === 0x33;
-    const mpeg = head[0] === 0xff && (head[1] & 0xe0) === 0xe0;
-    if (!riff && !id3 && !mpeg) throw new Error('语音网关返回了无法识别的音频');
+    // 能不能播交给浏览器判断：wav/mp3/ogg/flac/m4a/webm 都认，只挡住明显不是音频的响应体。
+    if (!(await sniffAudioExt(blob))) throw new Error('语音网关返回了无法识别的音频');
+    return storeAudio(segment, blob);
+}
+
+// 生成好的音频统一落缓存、存盘、通知界面；切段拼接的结果也走这里。
+async function storeAudio(segment, blob) {
     const url = URL.createObjectURL(blob);
+    // 切段请求出来的半句只用来拼整句，不进缓存也不占存储。
+    if (segment.cache === false) return url;
     const previous = memory.get(segment.key);
     if (previous && previous !== url) URL.revokeObjectURL(previous);
     memory.set(segment.key, url);
@@ -1049,7 +1174,6 @@ async function requestAudio(segment, requestId, signal) {
         speaker: segment.speaker,
         emotion: segment.emotion || 'default',
         effect: segment.effect || '',
-        director: segment.director || null,
         text: segment.text,
         timestamp: Date.now(),
     }).then(() => pruneAudioStore()).catch(async (error) => {
@@ -1108,10 +1232,11 @@ function effectOfKey(key) {
 }
 
 // ---------- 迷你播放条：当前句字幕 + 逐句进度 ----------
-// playList 是「这次朗读的句子顺序」，上一句/下一句按它在里面挪；playPos 是当前句的下标。
+// playList 是「这次朗读的句子顺序」，每条是 { key, node }：node 是这一句对应的那个气泡。
+// 同一楼里重复的台词（两次「嗯。」）各有各的 node，上一句/下一句不会都指回第一处。
 const playList = [];
 let playPos = -1;
-let liveKey = '';
+let liveTrack = null;
 // 进度每 200ms 刷一次，别每次都全页扫一遍气泡，只记住当前这句的节点。
 let progressNodes = [];
 
@@ -1119,15 +1244,31 @@ function playerBarNode() {
     return document.querySelector('#tad-player');
 }
 
-function keyListOfMessage(node) {
-    const holder = node?.closest('.mes_text') || node?.closest('.mes');
-    if (!holder) return node?.dataset.key ? [node.dataset.key] : [];
-    return [...holder.querySelectorAll(VOICE_NODE)].map((item) => item.dataset.key);
+function trackOf(node) {
+    return node?.dataset?.key ? { key: node.dataset.key, node } : null;
 }
 
-function setPlayList(keys) {
-    const list = (Array.isArray(keys) ? keys : []).filter((key) => !!key);
-    playList.splice(0, playList.length, ...[...new Set(list)]);
+function trackOfKey(key) {
+    return key ? { key, node: null } : null;
+}
+
+// 这句要亮哪些节点：点出来的句子只亮自己；全文朗读没有节点，才按 key 找。
+function trackNodes(track) {
+    if (track?.node) return [track.node];
+    return bubblesByKey(track?.key || '');
+}
+
+function tracksOfMessage(node) {
+    const holder = node?.closest('.mes_text') || node?.closest('.mes');
+    const single = trackOf(node);
+    if (!holder) return single ? [single] : [];
+    const tracks = [...holder.querySelectorAll(VOICE_NODE)].map(trackOf).filter(Boolean);
+    return tracks.length ? tracks : (single ? [single] : []);
+}
+
+function setPlayList(tracks) {
+    const list = (Array.isArray(tracks) ? tracks : []).filter((track) => !!track?.key);
+    playList.splice(0, playList.length, ...list);
     playPos = -1;
 }
 
@@ -1161,29 +1302,30 @@ function syncPlayerPause() {
     button.hidden = !voiceEngine.current;
 }
 
-function paintPlayerInfo(key) {
+function paintPlayerInfo(track) {
     const bar = playerBarNode();
     if (!bar) return;
-    const node = bubblesByKey(key)[0];
+    const node = track?.node || bubblesByKey(track?.key || '')[0];
     bar.querySelector('.tad-player-who').textContent = playerLabel(node);
     bar.querySelector('.tad-player-text').textContent = node?.dataset.text || '';
     bar.querySelector('[data-tad-player="queue"]').textContent = queueNote();
     syncPlayerPause();
 }
 
-function showPlayer(key) {
-    if (key) liveKey = key;
-    if (!liveKey) return;
-    playPos = playList.indexOf(liveKey);
-    progressNodes = bubblesByKey(liveKey);
+function showPlayer(track) {
+    if (track) liveTrack = track;
+    if (!liveTrack) return;
+    const index = playList.indexOf(liveTrack);
+    playPos = index >= 0 ? index : playList.findIndex((item) => item.key === liveTrack.key);
+    progressNodes = trackNodes(liveTrack);
     const bar = playerBarNode();
     if (bar) bar.hidden = false;
-    paintPlayerInfo(liveKey);
-    paintProgress({ key: liveKey, progress: 0 });
+    paintPlayerInfo(liveTrack);
+    paintProgress({ progress: 0 });
 }
 
 function hidePlayer() {
-    liveKey = '';
+    liveTrack = null;
     progressNodes.forEach((node) => node.style.removeProperty('--tad-progress'));
     progressNodes = [];
     const bar = playerBarNode();
@@ -1194,7 +1336,7 @@ function hidePlayer() {
 }
 
 // 进度：播放条上一条线，当前句上也跟着走一格，算是逐句高亮。
-function paintProgress({ key = '', progress = 0, duration = 0, time = 0 } = {}) {
+function paintProgress({ progress = 0, duration = 0, time = 0 } = {}) {
     const pct = Math.max(0, Math.min(100, Math.round((Number(progress) || 0) * 100)));
     const bar = playerBarNode();
     if (bar) {
@@ -1202,16 +1344,13 @@ function paintProgress({ key = '', progress = 0, duration = 0, time = 0 } = {}) 
         const clock = bar.querySelector('[data-tad-player="time"]');
         if (clock) clock.textContent = duration ? `${clockText(time)} / ${clockText(duration)}` : '';
     }
-    const target = key || liveKey;
-    if (!target) return;
-    if (target !== liveKey || !progressNodes.length) progressNodes = bubblesByKey(target);
     progressNodes.forEach((node) => node.style.setProperty('--tad-progress', `${pct}%`));
 }
 
 function pauseCurrent() {
     if (!voiceEngine.current || voiceEngine.paused) return false;
     if (!voiceEngine.pause()) return false;
-    bubblesByKey(voiceEngine.currentKey).forEach((node) => {
+    trackNodes(liveTrack).forEach((node) => {
         node.classList.remove('playing');
         node.classList.add('paused');
     });
@@ -1222,7 +1361,7 @@ function pauseCurrent() {
 function resumeCurrent() {
     if (!voiceEngine.paused || !voiceEngine.current) return false;
     if (!voiceEngine.resume()) return false;
-    bubblesByKey(voiceEngine.currentKey).forEach((node) => {
+    trackNodes(liveTrack).forEach((node) => {
         node.classList.remove('paused');
         node.classList.add('playing');
     });
@@ -1250,8 +1389,8 @@ function stepPlay(delta) {
     if (!playList.length || !delta) return;
     const base = playPos >= 0 ? playPos : (delta > 0 ? -1 : playList.length);
     const index = Math.max(0, Math.min(playList.length - 1, base + delta));
-    const key = playList[index];
-    const node = bubblesByKey(key)[0];
+    const track = playList[index];
+    const node = track?.node || bubblesByKey(track?.key || '')[0];
     if (!node) return;
     playPos = index;
     if (node.dataset.status === 'ready') {
@@ -1279,26 +1418,23 @@ function isTypingTarget(node) {
 }
 
 function segmentFromButton(btn, autoplay) {
-    let director = null;
-    if (btn.dataset.director) {
-        try { director = JSON.parse(btn.dataset.director); } catch { director = null; }
-    }
     return {
         key: btn.dataset.key,
         speaker: btn.dataset.voiceName,
         emotion: btn.dataset.voiceEmotion || 'default',
         effect: btn.dataset.effect || '',
         text: btn.dataset.text,
-        director,
         fresh: btn.dataset.fresh === '1',
         autoplay: !!autoplay,
+        track: trackOf(btn),
     };
 }
 
-function markPlayed(key) {
+function markPlayed(track) {
+    const key = track?.key;
     if (!key) return;
     playedKeys.add(key);
-    bubblesByKey(key).forEach((node) => node.classList.add('played'));
+    trackNodes(track).forEach((node) => node.classList.add('played'));
 }
 
 function markReady(key, url) {
@@ -1332,7 +1468,7 @@ function enqueueSegment(segment) {
     const key = segment?.key;
     if (!key || speechAbort.signal.aborted) return;
     const generation = speechAbort.signal;
-    if (segment.autoplay && !autoList.includes(key)) autoList.push(key);
+    if (segment.autoplay) pushAuto(segment.track || trackOfKey(key));
     if (!segment.fresh && memory.has(key)) {
         markReady(key, memory.get(key));
         considerDrain();
@@ -1381,20 +1517,20 @@ async function playBubble(btn) {
     }
     const token = ++playToken;
     autoList.splice(0, autoList.length);
+    const track = trackOf(btn);
     // 单句点击也要有上一句/下一句：按同一条消息里的气泡顺序建列表。
-    if (!playList.includes(key)) setPlayList(keyListOfMessage(btn));
-    playPos = playList.indexOf(key);
-    const same = bubblesByKey(key);
+    if (!playList.some((item) => item.node === btn)) setPlayList(tracksOfMessage(btn));
+    const same = trackNodes(track);
     document.querySelectorAll(`${VOICE_NODE}.playing, ${VOICE_NODE}.paused`).forEach((node) => {
         node.classList.remove('playing', 'paused');
     });
     same.forEach((node) => node.classList.add('playing'));
     revealNode(same[0]);
-    showPlayer(key);
+    showPlayer(track);
     await playUrl(url, key, btn.dataset.effect || '');
     if (token === playToken) {
         same.forEach((node) => node.classList.remove('playing', 'paused'));
-        markPlayed(key);
+        markPlayed(track);
         hidePlayer();
     }
 }
@@ -1403,12 +1539,12 @@ function considerDrain() {
     if (draining) return;
     const playback = playbackSettings();
     const buffer = Math.max(1, Math.min(20, Number(playback.bufferSize) || 1));
-    while (autoList.length && !memory.has(autoList[0]) && !pending.has(autoList[0]) && !genQueue.some((item) => item.key === autoList[0])) {
+    while (autoList.length && !memory.has(autoList[0].key) && !pending.has(autoList[0].key) && !genQueue.some((item) => item.key === autoList[0].key)) {
         autoList.shift();
     }
     let ready = 0;
-    for (const key of autoList) {
-        if (!memory.has(key)) break;
+    for (const track of autoList) {
+        if (!memory.has(track.key)) break;
         ready += 1;
     }
     const busy = pumping || genQueue.length > 0 || pending.size > 0;
@@ -1427,7 +1563,8 @@ async function drainAutoplay() {
     const token = playToken;
     try {
         while (autoList.length && token === playToken) {
-            const key = autoList[0];
+            const track = autoList[0];
+            const key = track.key;
             if (!memory.has(key)) {
                 if (pending.has(key) || genQueue.some((item) => item.key === key)) {
                     await waitQueueChange();
@@ -1437,19 +1574,19 @@ async function drainAutoplay() {
                 continue;
             }
             autoList.shift();
-            const same = bubblesByKey(key);
+            const same = trackNodes(track);
             document.querySelectorAll(`${VOICE_NODE}.playing, ${VOICE_NODE}.paused`).forEach((node) => {
                 node.classList.remove('playing', 'paused');
             });
             same.forEach((node) => node.classList.add('playing'));
             revealNode(same[0]);
-            showPlayer(key);
-            await playUrl(memory.get(key), key, effectOfKey(key));
+            showPlayer(track);
+            await playUrl(memory.get(key), key, track.node?.dataset.effect || effectOfKey(key));
             if (token === playToken) {
                 same.forEach((node) => node.classList.remove('playing', 'paused'));
-                markPlayed(key);
+                markPlayed(track);
                 // 下一句如果已经就绪，先解码好，播完这句就能直接接上。
-                const nextKey = autoList[0];
+                const nextKey = autoList[0]?.key;
                 if (nextKey && memory.has(nextKey)) voiceEngine.prime(nextKey, memory.get(nextKey));
             }
         }
@@ -1516,55 +1653,72 @@ function lastMesText() {
     return nodes.length ? nodes[nodes.length - 1] : null;
 }
 
+// DOM 里没有控件时（比如刚编辑过的楼层），从原始正文里现拼一份出来，顺序和正文一致。
 function segmentsFromPlain(text) {
-    const escaped = applyRegexFilters(text)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/\n/g, '<br>');
+    const marked = markSpeech(applyRegexFilters(text));
+    if (!marked) return [];
     const holder = document.createElement('div');
-    holder.innerHTML = parseTextToBubbles(escaped);
-    return [...holder.querySelectorAll(VOICE_NODE)].map((node) => {
-        let director = null;
-        if (node.dataset.director) {
-            try { director = JSON.parse(node.dataset.director); } catch { director = null; }
-        }
-        return {
-            key: node.dataset.key,
-            speaker: node.dataset.voiceName,
-            emotion: node.dataset.voiceEmotion || 'default',
-            effect: node.dataset.effect || '',
-            text: node.dataset.text,
-            director,
-            fresh: false,
-            autoplay: false,
-        };
-    });
+    holder.innerHTML = marked.controls.join('');
+    return [...holder.querySelectorAll(VOICE_NODE)].map((node) => ({
+        key: node.dataset.key,
+        speaker: node.dataset.voiceName,
+        emotion: node.dataset.voiceEmotion || 'default',
+        effect: node.dataset.effect || '',
+        text: node.dataset.text,
+        fresh: false,
+        autoplay: false,
+    }));
+}
+
+const SPEECH_ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', '#39': "'" };
+
+function decodeSpeechEntities(text) {
+    return String(text || '').replace(/&(#?\w+);/g, (match, name) => SPEECH_ENTITIES[name] ?? match);
+}
+
+// 念的文本要去掉排版符号：HTML、代码块、Markdown、表格、分隔线、列表符号。
+function stripForSpeech(html) {
+    const plain = String(html || '')
+        .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, ' ')
+        .replace(/```[\s\S]*?```/g, ' ')
+        .replace(/~~~[\s\S]*?~~~/g, ' ')
+        .replace(/<(?:br|\/p|\/div|\/li|\/h[1-6]|\/tr)\b[^>]*>/gi, '\n')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
+        .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+        .replace(/^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/gm, ' ')
+        .replace(/^\s*\|.*\|\s*$/gm, ' ')
+        .replace(/^\s*(?:[-*+]|\d+[.、)])\s+/gm, '')
+        .replace(/^\s*>\s?/gm, '')
+        .replace(/[*_~`#>|]+/g, ' ')
+        .replace(/[ \t]+/g, ' ')
+        .replace(/\n{2,}/g, '\n');
+    return decodeSpeechEntities(plain).trim();
 }
 
 function markupToSpeech(text) {
-    let source = applyRegexFilters(String(text || ''))
-        .replace(/<(tucao|advice|think)\b[^>]*>[\s\S]*?<\/\1>/gi, '');
-    source = source.replace(/[\[【][^\],:【】\[\]\n]{1,30}[\]】]\s*〖vd:([\s\S]*?)〗/g, (_, json) => {
-        try {
-            return segmentText(JSON.parse(json));
-        } catch {
-            return '';
-        }
-    });
-    source = source.replace(/[\[【][^\],:【】\[\]\n]{1,30}\s*[,，]\s*[^\]】\n]{1,40}[\]】]\s*([“"「『][^”"」』]*[”"」』])/g, '$1');
-    source = source.replace(/〖vd:[\s\S]*?〗/g, '');
-    source = source.replace(/[\[【][^\],:【】\[\]\n]{1,30}(?:\s*[,，]\s*[^\]】\n]{1,40})?[\]】]/g, '');
-    return source;
+    const source = applyRegexFilters(String(text || ''))
+        .replace(/<(tucao|advice|think)\b[^>]*>[\s\S]*?<\/\1>/gi, ' ');
+    // 每句台词只念标签里的文本。line.start 已经把前面那句译文圈进去了（自由格式只圈标签），
+    // 所以直接按区间替换成念的文本，一句不会念两遍，也不挑模板。
+    const { lines } = parseDialogueLines(source, { format: voiceFormat() });
+    let spoken = '';
+    let at = 0;
+    for (const line of lines) {
+        spoken += source.slice(at, line.start);
+        spoken += line.text ? `\n${line.text}\n` : ' ';
+        at = line.end;
+    }
+    return stripForSpeech(spoken + source.slice(at));
 }
 
 function fullSegments(text, speaker) {
+    const who = canonicalSpeaker(speaker);
     return splitSentences(markupToSpeech(text)).map((line) => ({
-        key: bubbleKey(speaker, 'default', line, ''),
-        speaker,
+        key: bubbleKey(who, 'default', line),
+        speaker: who,
         emotion: 'default',
         text: line,
-        director: null,
         fresh: false,
         autoplay: false,
     }));
@@ -1588,7 +1742,7 @@ function queueMessage(mes, autoplay, full = false) {
     }
     readingMes = mes;
     // 整楼连播时先记下句子顺序，播放条才能上一句/下一句。
-    setPlayList(segments.map((segment) => segment.key));
+    setPlayList(segments.map((segment) => trackOfKey(segment.key)));
     segments.forEach((segment) => enqueueSegment({ ...segment, autoplay: !!autoplay }));
 }
 
@@ -1642,18 +1796,33 @@ function scheduleLast(autoplay) {
 // 不该再整块重写一次，否则会打断选中、丢失焦点，还白跑一遍正则。
 const lastRenderedHtml = new WeakMap();
 
+// 楼层里有没有语音标签；换了自定义模板时按模板的开头标签判断，不再只认 <tts>。
+function looksLikeVoice(raw) {
+    if (!raw) return false;
+    if (/<(?:i-)?tts>/i.test(raw)) return true;
+    const format = compileFormat(voiceFormat());
+    if (format.standard) return false;
+    const tag = format.literals[0].match(/<[^<>]+>/);
+    return Boolean(tag && raw.includes(tag[0]));
+}
+
 function scan() {
     mountFullButtons();
     if (!enabled() || skipRewrite()) return;
     let changed = false;
+    const ctx = chatContext();
+    const chat = Array.isArray(ctx?.chat) ? ctx.chat : null;
     document.querySelectorAll(BUBBLE_ROOTS).forEach((node) => {
         if (!node.isConnected || node.closest(VOICE_NODE) || node.querySelector?.('#curEditTextarea')) return;
-        const html = node.innerHTML;
-        if (!html || (!html.includes('[') && !html.includes('【'))) return;
-        if (lastRenderedHtml.get(node) === html) return;
-        const next = parseTextToBubbles(html);
+        // 带 <tts> 的楼层只能从原始消息重画，DOM 里的标签已经被酒馆剥掉了。
+        const mesid = Number(node.closest('.mes')?.getAttribute('mesid'));
+        const entry = chat && Number.isInteger(mesid) ? chat[mesid] : null;
+        const raw = typeof entry?.mes === 'string' ? entry.mes : '';
+        if (!looksLikeVoice(raw)) return;
+        const next = rawTtsHtml(raw, entry, mesid);
+        if (!next || lastRenderedHtml.get(node) === next) return;
         lastRenderedHtml.set(node, next);
-        if (next === html) return;
+        if (next === node.innerHTML) return;
         node.innerHTML = next;
         changed = true;
     });
@@ -1691,26 +1860,23 @@ function playFromNode(btn) {
     const from = nodes.indexOf(btn);
     if (from < 0) return;
     stopPlayback();
-    setPlayList(nodes.map((node) => node.dataset.key));
+    setPlayList(nodes.map(trackOf));
     nodes.slice(from).forEach((node) => {
-        let director = null;
-        if (node.dataset.director) {
-            try { director = JSON.parse(node.dataset.director); } catch { director = null; }
-        }
         enqueueSegment({
             key: node.dataset.key,
             speaker: node.dataset.voiceName,
             emotion: node.dataset.voiceEmotion || 'default',
             effect: node.dataset.effect || '',
             text: node.dataset.text,
-            director,
             fresh: false,
             autoplay: true,
+            track: trackOf(node),
         });
     });
 }
 
 // 网关可能回 wav，也可能回 mp3/ogg。按文件头判断真实编码，文件名后缀别再说谎。
+// 只做识别，不做兜底：认不出来就返回空串，让调用方决定是报错还是当 wav 存。
 async function sniffAudioExt(blob) {
     try {
         const head = new Uint8Array(await blob.slice(0, 12).arrayBuffer());
@@ -1720,10 +1886,11 @@ async function sniffAudioExt(blob) {
         if (ascii(0, 4) === 'fLaC') return 'flac';
         if (ascii(0, 4) === 'FORM') return 'aiff';
         if (ascii(4, 8) === 'ftyp') return 'm4a';
+        if (head[0] === 0x1a && head[1] === 0x45 && head[2] === 0xdf && head[3] === 0xa3) return 'webm';
         if (ascii(0, 3) === 'ID3') return 'mp3';
         if (head[0] === 0xff && (head[1] & 0xe0) === 0xe0) return 'mp3';
-    } catch { /* 读不出文件头就按 wav 兜底 */ }
-    return 'wav';
+    } catch { /* 读不出文件头就当未知 */ }
+    return '';
 }
 
 async function downloadBubble(btn) {
@@ -1740,7 +1907,7 @@ async function downloadBubble(btn) {
         notify('error', '这段语音已经取不到了，重新生成一次');
         return;
     }
-    const ext = await sniffAudioExt(blob);
+    const ext = (await sniffAudioExt(blob)) || 'wav';
     const emotion = btn.dataset.voiceEmotion || 'default';
     const name = `[${safeFilePart(speaker)}]_[${safeFilePart(emotion)}]_${safeFilePart(btn.dataset.text)}_${await shortHash(btn.dataset.key || url)}.${ext}`;
     const href = URL.createObjectURL(blob);
@@ -1897,8 +2064,11 @@ function refreshRenderedMessages() {
                 if (!text || text.tagName !== 'DIV' || text.querySelector('#curEditTextarea')) return;
                 if (!entry || typeof entry.mes !== 'string') return;
                 try {
-                    text.innerHTML = ctx.messageFormatting(
-                        entry.mes,
+                    // 关掉扩展后不再改写正文，<tts> 标签要自己收干净，只留读者该看的那句。
+                    // 收在格式化之前做：格式化会把未知标签连同标签里的文字一起剥掉，剥完就分不清哪句是台词了。
+                    const source = settings.enabled ? entry.mes : humanizeTtsTags(entry.mes);
+                    const html = ctx.messageFormatting(
+                        source,
                         entry.name || '',
                         !!entry.is_system,
                         !!entry.is_user,
@@ -1906,6 +2076,7 @@ function refreshRenderedMessages() {
                         {},
                         false,
                     );
+                    text.innerHTML = html;
                 } catch { /* 这条还原失败就留着现有正文 */ }
             });
         }
@@ -1942,6 +2113,7 @@ function paintControls() {
     setValue('prompt-enabled', settings.prompt.enabled !== false);
     setValue('prompt-depth', settings.prompt.depth ?? 1);
     setValue('prompt-role', settings.prompt.role || 'system');
+    setValue('prompt-format', settings.prompt.format || DEFAULT_VOICE_FORMAT);
     setValue('prompt-content', settings.prompt.builtin === false ? (settings.prompt.content || '') : dialoguePrompt());
     setValue('scope', settings.playback.scope === 'full' ? 'full' : 'dialogue');
     setValue('compat', settings.playback.compat === true);
@@ -1968,7 +2140,7 @@ function paintControls() {
     });
     document.querySelectorAll('[data-tad="prompt-state"]').forEach((node) => {
         node.textContent = settings.prompt.builtin === false
-            ? '正在使用你改过的提示词。{{CHAR}} 会换成当前角色名，{{CHARACTERS}} 会换成网关角色表里这段剧情露过面的角色（一个都没认出来时给完整表），{{EMOTIONS}} 会换成情绪列表。'
+            ? '正在使用你改过的提示词。{{CHAR}} 会换成当前角色名，{{CHARACTERS}} 会换成网关角色表里这段剧情露过面的角色（一个都没认出来时给完整表），{{EMOTIONS}} 会换成情绪列表，{{格式}} 会换成上面的台词格式。'
             : '正在使用内置对白格式。改动文本后，下一次生成改用你写的版本。';
     });
     document.querySelectorAll('[data-tad="cache-path"]').forEach((node) => {
@@ -1992,7 +2164,14 @@ function commitSettings(patch) {
             delete patch.prompt.content;
             delete patch.prompt.builtin;
         }
+        const formatBefore = settings.prompt.format;
         Object.assign(settings.prompt, patch.prompt);
+        if (patch.prompt.format !== undefined) {
+            const next = String(settings.prompt.format || '').trim();
+            // 模板不合法就不写进去，面板会弹提示并把输入框退回原值。
+            settings.prompt.format = next && !formatProblem(next) ? next : formatBefore;
+            if (settings.prompt.format !== formatBefore) refreshView = true;
+        }
     }
     if (patch.playback) {
         Object.assign(settings.playback, patch.playback);
@@ -2154,7 +2333,7 @@ async function exportCache() {
     for (const item of items) {
         if (!item?.blob || !item.key) continue;
         // 按真实编码命名，wav/mp3/ogg 各归各位。
-        const ext = await sniffAudioExt(item.blob);
+        const ext = (await sniffAudioExt(item.blob)) || 'wav';
         const file = `[${safeFilePart(item.speaker)}]_[${safeFilePart(item.emotion || 'default')}]_${safeFilePart(item.text)}_${await shortHash(item.key)}.${ext}`;
         const handle = await folderHandle.getFileHandle(file, { create: true });
         const writable = await handle.createWritable();
@@ -2165,7 +2344,6 @@ async function exportCache() {
             speaker: item.speaker,
             emotion: item.emotion || 'default',
             effect: item.effect || '',
-            director: item.director || null,
             text: item.text,
             file,
             ext,
@@ -2207,7 +2385,6 @@ async function importCache() {
                 speaker: item.speaker,
                 emotion: item.emotion || 'default',
                 effect: item.effect || '',
-                director: item.director || null,
                 text: item.text,
                 timestamp: Date.now(),
             });
@@ -2231,22 +2408,17 @@ async function importCache() {
         const text = (bracketed ? match[3] : match[2]).trim();
         if (!text) continue;
         const file = await handle.getFile();
-        // 页面上还挂着同一句时用它的 key：情绪和导演块都在里面，别硬塞 default。
+        // 页面上还挂着同一句时用它的 key：情绪也在里面，别硬塞 default。
         const node = liveNodes.find((item) => item.dataset.text === text && item.dataset.voiceName === speaker)
             || liveNodes.find((item) => item.dataset.text === text);
-        let director = null;
-        if (node?.dataset.director) {
-            try { director = JSON.parse(node.dataset.director); } catch { director = null; }
-        }
         const finalSpeaker = node?.dataset.voiceName || speaker;
         const finalEmotion = node?.dataset.voiceEmotion || emotion;
         await audioStore.put({
-            key: node?.dataset.key || bubbleKey(finalSpeaker, finalEmotion, text, director ? stableStringify(director) : ''),
+            key: node?.dataset.key || bubbleKey(finalSpeaker, finalEmotion, text),
             blob: file,
             speaker: finalSpeaker,
             emotion: finalEmotion,
             effect: node?.dataset.effect || '',
-            director,
             text,
             timestamp: Date.now(),
         });
@@ -2566,6 +2738,17 @@ function promptModule() {
     depth.dataset.tad = 'prompt-depth';
     depthLabel.append(depth);
     const role = selectField('注入角色', 'prompt-role', [['system', 'System'], ['user', 'User'], ['assistant', 'Assistant']]);
+    const formatLabel = document.createElement('label');
+    formatLabel.className = 'tad-field';
+    formatLabel.append(document.createTextNode('台词格式'));
+    const formatInput = document.createElement('input');
+    formatInput.type = 'text';
+    formatInput.className = 'text_pole';
+    formatInput.dataset.tad = 'prompt-format';
+    formatLabel.append(formatInput);
+    const formatHint = document.createElement('div');
+    formatHint.className = 'tad-hint';
+    formatHint.textContent = '占位符：{译文} {角色} {情绪} {文本}。去掉 {译文} 就是自由格式：正文照常写，标签只补充谁、什么情绪、念哪句。改这里会同步提示词、解析和显示。';
     const content = document.createElement('textarea');
     content.className = 'text_pole tad-prompt';
     content.rows = 8;
@@ -2582,12 +2765,23 @@ function promptModule() {
     });
     depth.addEventListener('change', () => commitSettings({ prompt: { depth: Math.max(0, Number(depth.value) || 0) } }));
     role.querySelector('select').addEventListener('change', (event) => commitSettings({ prompt: { role: event.target.value } }));
+    formatInput.addEventListener('change', () => {
+        const value = formatInput.value.trim() || DEFAULT_VOICE_FORMAT;
+        const problem = formatProblem(value);
+        if (problem) {
+            notify('error', `台词格式有问题：${problem}`);
+            formatInput.value = voiceFormat();
+            return;
+        }
+        commitSettings({ prompt: { format: value } });
+        paintControls();
+    });
     content.addEventListener('change', () => {
         const builtin = content.value.trim() === dialoguePrompt().trim();
         commitSettings({ prompt: builtin ? { builtin: true, content: '' } : { builtin: false, content: content.value } });
     });
     reset.addEventListener('click', () => commitSettings({ prompt: { builtin: true, content: '' } }));
-    box.append(switches, depthLabel, role, content, state, reset);
+    box.append(switches, depthLabel, role, formatLabel, formatHint, content, state, reset);
     return box;
 }
 
