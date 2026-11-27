@@ -93,7 +93,9 @@ export function splitSentences(text) {
 // ST-iPhonie 的写法：「译文」+ <tts>角色|情绪|文本</tts>。
 // 译文是正文里显示的那句，文本是真正送进网关念的那句；中文里两者是同一条。
 // ST 默认开「小手机短标签」，新输出写的是 <i-tts>，两种都认；全角 ｜ 当分隔符的人也不少。
-const TTS_TAG = /<(?:i-)?tts\s*>([\s\S]{1,6000}?)<\/(?:i-)?tts\s*>/gi;
+// 上限是「一句台词能有多长」：以前写死 6000，超长的标签会整体不匹配，
+// 而且因为配对检查数得到开闭标签，连提示都没有，只留一堆裸文字。
+const TTS_TAG = /<(?:i-)?tts\s*>([\s\S]{1,20000}?)<\/(?:i-)?tts\s*>/gi;
 // 译文紧贴在标签前面才算「这句的译文」。模型写法五花八门，都要认成同一句：
 // 中文引号/直角引号/半角双引号、外层再包一层引号（"“你好”"）、全角引号（＂你好＂）。
 // 引号内的字符类一律排除其它引号，否则「“你好。”“再见。”<tts>」会被整段吞掉。
@@ -163,11 +165,22 @@ function literalPattern(literal) {
 }
 
 function formatPattern(format) {
+    const tail = literalPattern(format.literals[format.names.length]);
+    // 模板以占位符结尾时（`【{角色}, {情绪}】{文本}` 这种），惰性匹配会正好吞 0 个字，
+    // 「文本」永远是空的，一句都解析不出来。这时改成读到下一组的开头或正文结尾为止。
+    const head = format.names.length ? literalPattern(format.literals[0]) : '';
     let pattern = '';
     format.names.forEach((name, index) => {
-        pattern += `${literalPattern(format.literals[index])}([\\s\\S]{0,6000}?)`;
+        const literal = literalPattern(format.literals[index]);
+        if (index !== format.names.length - 1 || tail) {
+            pattern += `${literal}([\\s\\S]{0,20000}?)`;
+            return;
+        }
+        pattern += head
+            ? `${literal}([\\s\\S]{1,20000}?)(?=${head}|$)`
+            : `${literal}([\\s\\S]{1,20000})`;
     });
-    return new RegExp(pattern + literalPattern(format.literals[format.names.length]), 'gi');
+    return new RegExp(pattern + tail, 'gi');
 }
 
 // 标签写法诊断：<tts role="x"> 这种带属性的写法既不进 TTS_TAG，也不进未闭合统计，
@@ -309,7 +322,8 @@ function readFormatLine(source, match, format) {
     });
     const speaker = values['角色'] || '';
     const emotion = values['情绪'] || '';
-    const spoken = values['文本'] || '';
+    // 模板以 {文本} 结尾时，最后一段会一直读到正文末尾，容易把收尾的 HTML 一起吞进来。
+    const spoken = String(values['文本'] || '').replace(/(?:<[^<>]*>\s*)+$/, '').trim();
     if (!speaker) return { problem: '标签里没有写角色名' };
     if (PLACEHOLDER_ROLE.test(speaker)) return { problem: `角色名还是占位符 ${speaker}` };
     if (!spoken) return { problem: '标签里没有写台词' };

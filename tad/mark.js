@@ -40,11 +40,18 @@ export function unwaveFramed(html) {
     return String(html).replace(FRAMED, (block) => unmark(block));
 }
 
-/** 格式化之后：标记换成 controls[行号]；标记被切坏或者那行没控件时只留文字。 */
-export function waveMarks(html, controls = []) {
+/**
+ * 格式化之后：标记换成 controls[行号]；标记被切坏或者那行没控件时只留文字。
+ * onDrop 用来告诉调用方「这句被丢下了」，不然只有译文没有气泡，看不出是自己写的正则切坏了。
+ */
+export function waveMarks(html, controls = [], onDrop) {
     return unwaveFramed(html).replace(MARKED, (match, number, text) => {
         const control = controls[number.charCodeAt(0) - BASE];
-        if (!control || cutInto(text)) return text;
+        if (!control) return text;
+        if (cutInto(text)) {
+            if (typeof onDrop === 'function') onDrop(text);
+            return text;
+        }
         return control;
     }).replace(LEFT, '');
 }

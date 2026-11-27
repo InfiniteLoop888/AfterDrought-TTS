@@ -910,6 +910,14 @@ function warnRenderGap(reason) {
     if (warnedRenderGap) return;
     warnedRenderGap = true;
     console.warn(`[tts-afterdrought] 带 <tts> 的楼层没能重画：${reason}`);
+    // 只写控制台等于没说：用户看到的就是「没气泡、也没请求」，不知道该改哪儿。
+    notify('warning', `这句没能渲染成语音：${reason}`);
+}
+
+// 标记换控件时被丢掉（格式化的标签不配对，多半是正则过滤把一句话切开）——
+// 以前只留译文、什么都不说，看着就是「气泡凭空没了」。
+function reportDroppedBubble() {
+    warnRenderGap('这句的格式化结果里有没配对的标签，控件没挂上（检查正则过滤是不是切断了这句）');
 }
 
 function rawTtsHtml(raw, entry, id) {
@@ -933,7 +941,7 @@ function rawTtsHtml(raw, entry, id) {
         warnRenderGap(`messageFormatting 抛错：${err?.message || err}`);
         return null;
     }
-    return waveMarks(String(formatted), marked.controls);
+    return waveMarks(String(formatted), marked.controls, reportDroppedBubble);
 }
 
 // 酒馆显示的是 extra.display_text（有的话），读原始正文时跟着取那一份，才算和页面上是同一段字。
@@ -972,13 +980,13 @@ function installFormatterHooks() {
         if (!marked) return text;
         hookControls.set(Number(meta.messageId), marked.controls);
         // 没有 Markdown 之后的阶段就把控件直接插在这里，标记等不到换回来的时机。
-        return after ? marked.text : waveMarks(marked.text, marked.controls);
+        return after ? marked.text : waveMarks(marked.text, marked.controls, reportDroppedBubble);
     }, { stage: before, order: 100 });
     if (after) {
         formatter.addHook((text, meta) => {
             const controls = hookControls.get(Number(meta?.messageId));
             if (typeof text !== 'string' || !controls || !hookApplies(meta)) return text;
-            return waveMarks(text, controls);
+            return waveMarks(text, controls, reportDroppedBubble);
         }, { stage: after, order: 100 });
     }
     formatterHooked = true;
@@ -1879,14 +1887,27 @@ function scheduleLast(autoplay) {
     pump();
 }
 
-// 楼层里有没有语音标签；换了自定义模板时按模板的开头标签判断，不再只认 <tts>。
+// 楼层里有没有语音标签。标准形状只认 <tts>；换了自定义模板就按模板里第一段固定文字找，
+// 不再要求那段必须长成 HTML 标签——`【{角色}, {情绪}】…` 这种模板以前一律判成「没有标记」，
+// 于是整楼既不渲染也不入队。
+function literalAppears(raw, literal) {
+    const base = String(literal || '').trim();
+    if (!base) return false;
+    const variants = new Set([base]);
+    if (base.includes('|')) variants.add(base.replace(/\|/g, '｜'));
+    if (base.includes('｜')) variants.add(base.replace(/｜/g, '|'));
+    return [...variants].some((part) => part && raw.includes(part));
+}
+
 function looksLikeVoice(raw) {
     if (!raw) return false;
     if (/<(?:i-)?tts>/i.test(raw)) return true;
     const format = compileFormat(voiceFormat());
     if (format.standard) return false;
-    const tag = format.literals[0].match(/<[^<>]+>/);
-    return Boolean(tag && raw.includes(tag[0]));
+    const literal = format.literals.map((part) => String(part || '')).find((part) => part.trim());
+    // 模板里连一段固定文字都没有时判断不了，交给解析器去看。
+    if (!literal) return true;
+    return literalAppears(raw, literal);
 }
 
 // 一次性自检：正文没被改写时，先看这几项，省得来回猜是开关、兼容模式还是酒馆接口拿不到。
@@ -1932,6 +1953,11 @@ function repairMissingBubbles() {
     return repaired > 0;
 }
 
+// 从一段 HTML 里取出所有控件的缓存键：只比状态属性的话，ready/error/waiting 的来回会一直被当成「正文变了」。
+function voiceKeysOf(html) {
+    return (String(html).match(/data-key="[^"]*"/g) || []).join('\u0001');
+}
+
 function scan() {
     mountFullButtons();
     if (!enabled() || skipRewrite()) return;
@@ -1957,6 +1983,9 @@ function scan() {
         // 只认当前 DOM：酒馆自己重画过（刷新楼层、切 swipe）之后，气泡就没了，
         // 这时再拿缓存跳过重画，正文会一直停在剥完标签的样子。
         if (next === node.innerHTML) return;
+        // 同一批台词已经在正文里了，差别只在状态：重写会把失败的气泡改回 waiting，
+        // 下一轮扫描又入队一次，合成失败（或网关慢）时就成了每隔 120ms 重发请求的死循环。
+        if (voiceKeysOf(next) === voiceKeysOf(node.innerHTML)) return;
         node.innerHTML = next;
         changed = true;
     });
