@@ -7,6 +7,44 @@ const SYSTEM_KEYWORDS = /^(?:ONSTAGE|RECALL|ARCHIVE|FLOOR|STATUS|SYS|VAR|STAGE|S
 const EMOTION_TAG = /[\[【]([^\],:【】\[\]\n]{1,30})\s*[,，]\s*([^\]】\n]{1,30})[\]】]/g;
 const BARE_TAG = /[\[【]([^\],:【】\[\]\n]{1,30})[\]】]/g;
 
+// 代码块里的方括号多半是示例或教程，念出来就是噪音。
+// 到这一步正文已经是 HTML，围栏代码块一般是 <pre><code>。
+const CODE_BLOCKS = [
+    /```[\s\S]*?```/g,
+    /~~~[\s\S]*?~~~/g,
+    /`[^`\n]*`/g,
+    /<pre\b[\s\S]*?<\/pre>/gi,
+    /<code\b[\s\S]*?<\/code>/gi,
+];
+
+// 返回逐字符的「在代码里」标记，长度和原文一致，偏移量不用换算。
+function codeMask(text, streaming) {
+    if (!text.includes('`') && !/<(?:pre|code)\b/i.test(text)) return null;
+    const mask = new Uint8Array(text.length);
+    const patterns = streaming ? CODE_BLOCKS.concat(/```[\s\S]*$/g, /~~~[\s\S]*$/g) : CODE_BLOCKS;
+    for (const re of patterns) {
+        re.lastIndex = 0;
+        let match;
+        while ((match = re.exec(text)) !== null) {
+            if (!match[0].length) {
+                re.lastIndex += 1;
+                continue;
+            }
+            mask.fill(1, match.index, match.index + match[0].length);
+        }
+    }
+    return mask;
+}
+
+function nextEmotionTag(text, mask, from) {
+    EMOTION_TAG.lastIndex = from;
+    let match;
+    while ((match = EMOTION_TAG.exec(text)) !== null) {
+        if (!mask || !mask[match.index]) return match;
+    }
+    return null;
+}
+
 export function visibleText(value) {
     return String(value || '').replace(/<[^>]+>|&lt;[^&]+&gt;|&nbsp;/gi, ' ').replace(/\s+/g, ' ').trim();
 }
@@ -216,15 +254,19 @@ export function parseDialogueLines(source, options = {}) {
     const text = String(source || '');
     const lines = [];
     const problems = [];
+    const mask = codeMask(text, streaming);
     let searchFrom = 0;
 
     while (searchFrom < text.length) {
-        EMOTION_TAG.lastIndex = searchFrom;
-        const emotionMatch = EMOTION_TAG.exec(text);
+        const emotionMatch = nextEmotionTag(text, mask, searchFrom);
         BARE_TAG.lastIndex = searchFrom;
         let bareMatch = null;
         let segment = null;
         while ((bareMatch = BARE_TAG.exec(text)) !== null) {
+            if (mask && mask[bareMatch.index]) {
+                segment = null;
+                continue;
+            }
             segment = readSegmentDirector(text, bareMatch.index + bareMatch[0].length);
             if (segment) break;
         }

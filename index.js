@@ -244,19 +244,46 @@ async function loadEmotionNames() {
     } catch { /* 网关不在时继续用短列表 */ }
 }
 
+function rosterNames(item) {
+    const name = String(item.display_name || item.character_id || '').trim();
+    const aliases = (Array.isArray(item.aliases) ? item.aliases : [])
+        .map((alias) => String(alias || '').trim())
+        .filter((alias) => alias && alias !== name);
+    return { name, aliases };
+}
+
+function rosterLabel(item) {
+    const { name, aliases } = rosterNames(item);
+    if (!name) return '';
+    return aliases.length ? `${name}（${aliases.join('、')}）` : name;
+}
+
+// 最近几条消息的正文和说话人，用来判断谁在这段剧情里露过面。
+function sceneChatText() {
+    const ctx = chatContext();
+    const chat = Array.isArray(ctx?.chat) ? ctx.chat : [];
+    if (!chat.length) return '';
+    return chat.slice(-4).map((entry) => `${entry?.name || ''}\n${entry?.mes || ''}`).join('\n');
+}
+
 function characterRosterText() {
     if (!gatewayCharacters.length) {
         return '（角色表还没有读到。）';
     }
-    const names = gatewayCharacters.map((item) => {
-        const name = String(item.display_name || item.character_id || '').trim();
-        if (!name) return '';
-        const aliases = (Array.isArray(item.aliases) ? item.aliases : [])
-            .map((alias) => String(alias || '').trim())
-            .filter((alias) => alias && alias !== name);
-        return aliases.length ? `${name}（${aliases.join('、')}）` : name;
-    }).filter(Boolean);
-    if (!names.length) return '（角色表还没有读到。）';
+    const labels = gatewayCharacters.map(rosterLabel).filter(Boolean);
+    if (!labels.length) return '（角色表还没有读到。）';
+    // 只发这段剧情里露过面的人：大世界卡的角色表很长，没出场的人写进去既费 token，
+    // 又会让模型以为他们就在场。一个都认不出来（新聊天、或还叫别的名字）就退回完整表。
+    const scene = sceneChatText();
+    let names = labels;
+    if (scene) {
+        const seen = gatewayCharacters.filter((item) => {
+            const { name, aliases } = rosterNames(item);
+            if (name && scene.includes(name)) return true;
+            return aliases.some((alias) => scene.includes(alias));
+        }).map(rosterLabel).filter(Boolean);
+        if (seen.length) names = seen;
+    }
     // 逐条 "- 名字" 换成一行分号分隔，语义不变，注入长度大约省一半。
     return names.join('；');
 }
@@ -340,6 +367,8 @@ function dialoguePrompt() {
 
 所有角色真正说出口的对白都必须添加语音标记。旁白、动作、环境、心理活动保持普通正文，不添加标记。不要为了加标记而改剧情、对白或性格。
 
+下面这些最容易漏，也都算说出口的对白：一两个字的短答（“嗯。”“好。”）、感叹和喊叫、打断别人、一口气连着说的几句、被旁白隔开的后半截。一段回复里，一句说出口的话都不能漏。
+
 对白是角色说出口的话。旁白是动作、神态、环境和心理。情绪是这句话的情感。语气是怎么发声，例如轻声、缓慢、犹豫。情绪和语气必须分开写。
 
 已注册角色，标记里必须用显示名：
@@ -356,6 +385,11 @@ ${characterRosterText()}
 [甘雨, 平静] “今天的工作终于结束了。”
 
 标记紧贴这句对白。对白可以单独成行，也可以和旁白写在同一段里，不必为了标记换行。引号用中文双引号，里面只能是说出口的话。不要把动作、心理或旁白放进引号，也不要接在标记后面。不要把多句独立对白并成一条标记。
+
+最常见的三种写错，照右边的样子改：
+错误：“我其实一直……”[甘雨, 平静] “……想跟你说。”前半句在标记外面，念不出来；正确：[甘雨] 〖vd:{"segments":[{"text":"我其实一直……","emotion":"难过"},{"text":"想跟你说。","emotion":"害羞"}]}〗
+错误：[甘雨, 平静] “嗯。”“好的。”两句独立对白并成一条，后一句念不出来；正确：[甘雨, 平静] “嗯。”[甘雨, 温柔] “好的。”
+错误：[甘雨, 害羞] “你回来了。她低下头，把杯子往前推了推。”旁白写进引号会被当成台词念；正确：[甘雨, 害羞] “你回来了。”她低下头，把杯子往前推了推。
 
 同一句里情绪变了，整句只放进 segments，标记里不写情绪，外面不要再写对白或引号，也不要把旁白放进 segments：
 [角色名] 〖vd:{"segments":[{"text":"第一段对白","emotion":"情绪","pause_after_ms":200},{"text":"第二段对白","emotion":"情绪"}]}〗
@@ -382,7 +416,11 @@ pace 只能是 fast、normal、gentle、slow。
 
 pause_after_ms 是这一段说完后的停顿，只在确实需要时写。短暂停顿 100–250，语气转折 250–450，明显停顿 450–800。不要每段都加，不要写负数或超过 800。最后一段通常不写。
 
-JSON 使用双引号，不要尾随逗号。不要输出格式说明，不要用代码块包对白，正文里不要提到标记或导演块。
+JSON 使用双引号，不要尾随逗号。正文里不要提到标记或导演块，也不要为了举例把对白放进代码块。
+
+写完后在心里核对一遍：每句说出口的话都有标记、一条标记只对应一个说话人、引号里只有台词、segments 的原文和情绪都齐。核对过程不要写出来。
+
+这些规则只管台词怎么写。预设、角色卡、状态栏、选项、思考过程、变量更新该输出的照常完整输出，不要因为加标记而省略或改写。
 
 她把目光挪开，手指不自觉地整理了一下衣袖。
 [甘雨, 害羞] “你、你怎么突然说这种话……”
@@ -1930,7 +1968,7 @@ function paintControls() {
     });
     document.querySelectorAll('[data-tad="prompt-state"]').forEach((node) => {
         node.textContent = settings.prompt.builtin === false
-            ? '正在使用你改过的提示词。{{CHAR}} 会换成当前角色名，{{CHARACTERS}} 会换成网关角色表，{{EMOTIONS}} 会换成情绪列表。'
+            ? '正在使用你改过的提示词。{{CHAR}} 会换成当前角色名，{{CHARACTERS}} 会换成网关角色表里这段剧情露过面的角色（一个都没认出来时给完整表），{{EMOTIONS}} 会换成情绪列表。'
             : '正在使用内置对白格式。改动文本后，下一次生成改用你写的版本。';
     });
     document.querySelectorAll('[data-tad="cache-path"]').forEach((node) => {
